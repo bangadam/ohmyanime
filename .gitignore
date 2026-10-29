@@ -18,3 +18,9 @@ bin/
 .DS_Store
 coverage.out
 *.log
+
+# build artifacts
+*.tsbuildinfo
+
+# agent tooling
+.pawbytes/

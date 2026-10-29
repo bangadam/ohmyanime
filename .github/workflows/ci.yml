@@ -23,6 +23,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
         working-directory: web
+      - run: bun run lint
+        working-directory: web
+      - run: bun run test
+        working-directory: web
       - run: bun run typecheck
         working-directory: web
       - run: bun run build

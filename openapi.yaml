@@ -247,8 +247,74 @@
           {
             "name": "genre",
             "in": "query",
+            "description": "Genre filter. Repeat the parameter or pass a comma-separated list; entries are ANDed.",
+            "style": "form",
+            "explode": true,
             "schema": {
-              "type": "string"
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Tag filter. Repeat the parameter or pass a comma-separated list; entries are ANDed.",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "releasing",
+                "finished",
+                "not_yet_released",
+                "cancelled",
+                "hiatus"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tv",
+                "tv_short",
+                "movie",
+                "special",
+                "ova",
+                "ona",
+                "music"
+              ]
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "popular",
+                "trending",
+                "score",
+                "newest",
+                "updated",
+                "title_asc",
+                "title_desc"
+              ],
+              "default": "popular"
             }
           },
           {
@@ -1286,6 +1352,56 @@
         }
       }
     },
+    "/api/v1/tags": {
+      "get": {
+        "operationId": "getTags",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "504": {
+            "$ref": "#/components/responses/Error504"
+          }
+        }
+      }
+    },
     "/api/v1/schedule": {
       "get": {
         "operationId": "getSchedule",
@@ -2045,6 +2161,111 @@
           }
         }
       }
+    },
+    "/api/v1/manga": {
+      "get": {
+        "operationId": "searchManga",
+        "description": "Searches the enabled manga provider. An empty query returns popular titles. Cursor pages through the provider catalogue.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MangaPageResponse"
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error400"},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "429": {"$ref": "#/components/responses/Error429"},
+          "502": {"$ref": "#/components/responses/Error502"},
+          "503": {"$ref": "#/components/responses/Error503"},
+          "504": {"$ref": "#/components/responses/Error504"}
+        },
+        "parameters": [
+          {"name": "query", "in": "query", "schema": {"type": "string"}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+          {"$ref": "#/components/parameters/limit"}
+        ]
+      }
+    },
+    "/api/v1/manga/{id}": {
+      "get": {
+        "operationId": "getManga",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MangaResponse"
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error400"},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "404": {"$ref": "#/components/responses/Error404"},
+          "429": {"$ref": "#/components/responses/Error429"},
+          "502": {"$ref": "#/components/responses/Error502"}
+        },
+        "parameters": [
+          {"$ref": "#/components/parameters/id"}
+        ]
+      }
+    },
+    "/api/v1/manga/{id}/chapters": {
+      "get": {
+        "operationId": "listMangaChapters",
+        "description": "Lists readable chapters in ascending reading order.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChapterListResponse"
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error400"},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "404": {"$ref": "#/components/responses/Error404"},
+          "429": {"$ref": "#/components/responses/Error429"},
+          "502": {"$ref": "#/components/responses/Error502"}
+        },
+        "parameters": [
+          {"$ref": "#/components/parameters/id"}
+        ]
+      }
+    },
+    "/api/v1/manga/chapters/{id}/pages": {
+      "get": {
+        "operationId": "getMangaChapterPages",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MangaPagesResponse"
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/Error400"},
+          "401": {"$ref": "#/components/responses/Error401"},
+          "404": {"$ref": "#/components/responses/Error404"},
+          "429": {"$ref": "#/components/responses/Error429"},
+          "502": {"$ref": "#/components/responses/Error502"}
+        },
+        "parameters": [
+          {"$ref": "#/components/parameters/id"}
+        ]
+      }
     }
   },
   "components": {
@@ -2080,6 +2301,49 @@
           "requestId"
         ]
       },
+      "Manga": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "description": "Provider-prefixed opaque ID, e.g. mangadex:<uuid>."},
+          "title": {"type": "string"},
+          "alternativeTitles": {"type": "array", "items": {"type": "string"}},
+          "posterUrl": {"type": "string", "description": "Validated public cover URL."},
+          "synopsis": {"type": "string"},
+          "type": {"type": "string"},
+          "year": {"type": "integer"},
+          "status": {"type": "string"},
+          "tags": {"type": "array", "items": {"type": "string"}},
+          "author": {"type": "string"},
+          "availability": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["id", "title", "availability"]
+      },
+      "MangaChapter": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "mangaId": {"type": "string"},
+          "label": {"type": "string", "examples": ["Ch. 12", "Ch. 12.5", "Oneshot"]},
+          "title": {"type": "string"},
+          "ordinal": {"type": "number"},
+          "volume": {"type": "string"},
+          "number": {"type": "string", "description": "Decimal chapter number; keeps 12 and 12.5 distinct."},
+          "special": {"type": "string", "description": "Non-numbered distinction, e.g. oneshot, extra."},
+          "language": {"type": "string"},
+          "pageCount": {"type": "integer"},
+          "publishedAt": {"type": "string", "format": "date-time"},
+          "groupName": {"type": "string"}
+        },
+        "required": ["id", "mangaId", "label", "ordinal", "language", "pageCount"]
+      },
+      "MangaPage": {
+        "type": "object",
+        "properties": {
+          "index": {"type": "integer", "minimum": 1},
+          "url": {"type": "string", "format": "uri"}
+        },
+        "required": ["index", "url"]
+      },
       "Anime": {
         "type": "object",
         "properties": {
@@ -2114,6 +2378,18 @@
           },
           "status": {
             "type": "string"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "availability": {
             "type": "array",
@@ -2648,6 +2924,25 @@
           "name"
         ]
       },
+      "Tag": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "category"
+        ]
+      },
       "ScheduleItem": {
         "type": "object",
         "properties": {
@@ -2778,6 +3073,20 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Genre"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "TagList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
             }
           }
         },
@@ -3128,6 +3437,21 @@
           "requestId"
         ]
       },
+      "TagListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TagList"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "requestId"
+        ]
+      },
       "ScheduleListResponse": {
         "type": "object",
         "properties": {
@@ -3142,6 +3466,60 @@
           "data",
           "requestId"
         ]
+      },
+      "MangaPageResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": {"type": "array", "items": {"$ref": "#/components/schemas/Manga"}},
+              "nextCursor": {"type": ["string", "null"]}
+            },
+            "required": ["items", "nextCursor"]
+          },
+          "requestId": {"type": "string"}
+        },
+        "required": ["data", "requestId"]
+      },
+      "MangaResponse": {
+        "type": "object",
+        "properties": {
+          "data": {"$ref": "#/components/schemas/Manga"},
+          "requestId": {"type": "string"}
+        },
+        "required": ["data", "requestId"]
+      },
+      "ChapterListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": {"type": "array", "items": {"$ref": "#/components/schemas/MangaChapter"}},
+              "nextCursor": {"type": ["string", "null"]}
+            },
+            "required": ["items", "nextCursor"]
+          },
+          "requestId": {"type": "string"}
+        },
+        "required": ["data", "requestId"]
+      },
+      "MangaPagesResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "items": {"type": "array", "items": {"$ref": "#/components/schemas/MangaPage"}},
+              "chapter": {"$ref": "#/components/schemas/MangaChapter"},
+              "mangaId": {"type": "string"}
+            },
+            "required": ["items", "chapter", "mangaId"]
+          },
+          "requestId": {"type": "string"}
+        },
+        "required": ["data", "requestId"]
       },
       "HealthResponse": {
         "type": "object",

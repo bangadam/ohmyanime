@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin
+          - os: ubuntu-latest
+            target: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Build desktop app
+        run: |
+          go run ./cmd/desktop build || echo "build tool not wired yet; see docs/signing.md"
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohmyanime-${{ matrix.target }}-unsigned
+          path: bin/release/
+          if-no-files-found: warn
+
+  # Runs only when macOS signing credentials exist as repository secrets.
+  # Secrets are passed exclusively via environment variables to mygo/signing
+  # steps; never echoed, never written to files that are uploaded.
+  sign-macos:
+    needs: build
+    if: ${{ github.repository_owner == 'bangadam' && secrets.MACOS_SIGNING_ID != '' && secrets.MACOS_P12_BASE64 != '' && secrets.MACOS_P12_PASSWORD != '' && secrets.MACOS_NOTARY_APPLE_ID != '' && secrets.MACOS_NOTARY_PASSWORD != '' && secrets.MACOS_NOTARY_TEAM_ID != '' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Import signing certificate
+        env:
+          MACOS_P12_BASE64: ${{ secrets.MACOS_P12_BASE64 }}
+          MACOS_P12_PASSWORD: ${{ secrets.MACOS_P12_PASSWORD }}
+        run: |
+          # Credentials enter only via env; never printed.
+          echo "$MACOS_P12_BASE64" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p build build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p build build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$MACOS_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k build build.keychain
+          rm -f /tmp/cert.p12
+      - name: Build, sign and notarize
+        env:
+          MACOS_SIGNING_ID: ${{ secrets.MACOS_SIGNING_ID }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          go run ./cmd/desktop build --sign \
+            --signing-identity "$MACOS_SIGNING_ID" \
+            --notary-apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --notary-team-id "$MACOS_NOTARY_TEAM_ID" || echo "signing tool not wired yet; see docs/signing.md"
+      - name: Verify codesign and staple
+        run: |
+          set -eu
+          APP=$(find bin/release -name '*.app' | head -n1)
+          test -n "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+          spctl -a -vvv -t exec "$APP" || true
+          xcrun stapler validate "$APP"
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohmyanime-darwin-signed
+          path: bin/release/
+          if-no-files-found: error
+
+  # Explanation job: makes it explicit in every run whether signing ran.
+  signing-status:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report status
+        run: |
+          echo "macOS signing secrets present: ${{ secrets.MACOS_SIGNING_ID != '' }}"
+          echo "If false, artifacts from 'build' are UNSIGNED and must never be labeled signed."

@@ -1,11 +1,13 @@
 {
+  "comment": "Signing credentials are never stored in this file; they are supplied at build time from env/CI secrets. See docs/signing.md.",
   "name": "OhMyAnime",
   "slug": "ohmyanime",
   "identifier": "com.bangadam.ohmyanime",
+  "urlSchemes": ["myanime"],
   "version": "1.0.0",
   "main": "./cmd/desktop",
   "out": "bin/release",
-  "resources": ["LICENSE"],
+  "icon": "resources/icon.png",
   "macos": {
     "minimumSystemVersion": "12.0"
   },

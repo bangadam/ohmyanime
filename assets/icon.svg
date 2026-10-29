@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OhMyAnime app icon — original artwork (ROADMAP 3.5, issue #16).
+  Ownership: bangadam (Muhammad Meganata Adam), created for the ohmyanime
+  project, 2026. Released under the repository LICENSE (MIT).
+  Geometry only: a rounded-square badge, a play glyph and an accent dot —
+  no third-party anime artwork, characters, or trademarks.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="OhMyAnime">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b1d6b"/>
+      <stop offset="1" stop-color="#141032"/>
+    </linearGradient>
+  </defs>
+  <!-- badge -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <!-- scanline arcs suggesting a broadcast/stream -->
+  <circle cx="512" cy="512" r="436" fill="none" stroke="#5b53a8" stroke-width="26" opacity="0.5"/>
+  <!-- play glyph, rounded joins keep it legible at 16 px -->
+  <path d="M 356 316 L 356 708 Q 356 748 390 726 L 700 530 Q 730 510 700 490 L 390 294 Q 356 272 356 316 Z"
+        fill="#ffffff" stroke="#ffffff" stroke-width="40" stroke-linejoin="round"/>
+  <!-- accent spark -->
+  <circle cx="762" cy="268" r="84" fill="#4de3c1"/>
+</svg>
