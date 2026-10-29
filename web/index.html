@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#090d16" />
+    <meta name="description" content="OhMyAnime — your anime library, player, and watch history." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>OhMyAnime</title>
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("ohmyanime.theme");
+          var mode = stored === "light" || stored === "system" ? stored : "dark";
+          var resolved = mode === "system"
+            ? (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+            : mode;
+          var root = document.documentElement;
+          root.dataset.theme = resolved;
+          root.dataset.themeMode = mode;
+          root.style.colorScheme = resolved;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", resolved === "light" ? "#f3f5fa" : "#090d16");
+        } catch (error) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

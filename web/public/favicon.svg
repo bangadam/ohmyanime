@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="OhMyAnime">
+  <rect width="64" height="64" rx="14" fill="#090d16"/>
+  <path d="M24 18v28l24-14z" fill="#82b0ff"/>
+  <circle cx="18" cy="18" r="4" fill="#2864db"/>
+</svg>

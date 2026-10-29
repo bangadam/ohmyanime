@@ -1,0 +1,20 @@
+# dependencies
+web/node_modules/
+
+# build output
+web/dist/
+bin/
+*.exe
+
+# local data and secrets
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+# tooling
+.DS_Store
+coverage.out
+*.log

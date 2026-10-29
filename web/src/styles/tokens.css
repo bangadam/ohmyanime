@@ -1,0 +1,132 @@
+/*
+  Cinematic Blue — semantic tokens transcribed from docs/design-v2/tokens.json.
+  HEX sRGB only. Dark is the reference appearance; light overrides live below.
+  Artwork keeps its natural colors: scrims are alpha layers, never an artwork filter.
+*/
+:root {
+  color-scheme: dark;
+
+  /* Color — dark reference */
+  --color-bg: #090d16;
+  --color-panel: #141c2b;
+  --color-raised: #243148;
+  --color-text: #f5f7fc;
+  --color-muted: #b7c5dc;
+  --color-line: #3b4f6d;
+  --color-accent: #82b0ff;
+  --color-on-accent: #081a37;
+  --color-primary: #2864db;
+  --color-on-primary: #ffffff;
+  --color-danger: #ffb2c1;
+  --color-input-border: #839aba;
+  --color-focus: #a7c9ff;
+  --color-hero-text: #e0e9f8;
+  --color-media: #02050b;
+  --color-track: #596e90;
+  /* Media chrome is always dark, so seek emphasis keeps the dark accent in both themes. */
+  --color-media-accent: #82b0ff;
+
+  /* Alpha scrims keep original artwork colors intact. */
+  --scrim-hero: rgba(9, 13, 22, 0.94);
+  --scrim-hero-soft: rgba(9, 13, 22, 0.55);
+  --scrim-player-top: rgba(2, 5, 11, 0.82);
+  --scrim-player-bottom: rgba(2, 5, 11, 0.92);
+  --overlay-chip: rgba(9, 13, 22, 0.72);
+  --backdrop: rgba(2, 5, 11, 0.72);
+  --danger-surface: #251a22;
+
+  /* Type */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-hero: clamp(3.5rem, 5.2vw, 4.5rem);
+  --font-page: 2.5rem;
+  --font-section: 1.5rem;
+  --font-subsection: 1.125rem;
+  --font-body: 1rem;
+  --font-control: 0.875rem;
+  --font-meta: 0.75rem;
+  --line-heading: 1.15;
+  --line-body: 1.6;
+  --line-synopsis: 1.6;
+  --measure-synopsis: 65ch;
+  --tracking-tight: -0.02em;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-extrabold: 800;
+
+  /* Space, shape, targets */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 48px;
+  --space-10: 64px;
+  --gutter: 48px;
+  --poster-gap: 20px;
+  --section-gap: 40px;
+  --radius-control: 4px;
+  --radius-poster: 6px;
+  --radius-panel: 8px;
+  --nav-height: 80px;
+  --target-min: 44px;
+  --player-target: 48px;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --content-max: 1680px;
+
+  /* Motion — specification, no framework */
+  --duration-open: 250ms;
+  --duration-close: 150ms;
+  --duration-panel-open: 400ms;
+  --duration-panel-close: 350ms;
+  --duration-indicator: 250ms;
+  --duration-reveal: 400ms;
+  --ease-surface: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Layers */
+  --z-nav: 40;
+  --z-popover: 60;
+  --z-dialog: 100;
+  --z-player: 120;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #f3f5fa;
+  --color-panel: #ffffff;
+  --color-raised: #e4eaf5;
+  --color-text: #111c30;
+  --color-muted: #4c5f7c;
+  --color-line: #bdcae0;
+  --color-accent: #174ec4;
+  --color-on-accent: #ffffff;
+  --color-primary: #174ec4;
+  --color-on-primary: #ffffff;
+  --color-danger: #a7283e;
+  --color-input-border: #6b809f;
+  --color-focus: #174ec4;
+  --color-hero-text: #e0e9f8;
+  --color-media: #02050b;
+  --color-track: #596e90;
+  --scrim-hero: rgba(2, 5, 11, 0.94);
+  --scrim-hero-soft: rgba(2, 5, 11, 0.55);
+  --overlay-chip: rgba(2, 5, 11, 0.72);
+  --backdrop: rgba(2, 5, 11, 0.72);
+  --danger-surface: #fbeef1;
+}
+
+@media (max-width: 1099px) {
+  :root {
+    --gutter: 20px;
+    --font-page: 2rem;
+    --font-section: 1.375rem;
+    --font-control: 1rem;
+    --nav-height: 64px;
+    --section-gap: 32px;
+  }
+}

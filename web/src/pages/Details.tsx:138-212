@@ -1,0 +1,75 @@
+        {showEpisodesSection ? (
+          <section className="detail-episodes" aria-labelledby="detail-episodes-heading" aria-busy={loading}>
+            <SectionHeader
+              id="detail-episodes-heading"
+              title={showEpisodeList ? copy.details.episodes : copy.details.movie}
+              count={showEpisodeList && ready && orderedEpisodes.length > 0 ? orderedEpisodes.length : undefined}
+            />
+
+            {loading ? (
+              <>
+                <p className="visually-hidden" role="status">
+                  {copy.details.loadingEpisodes}
+                </p>
+                <div className="detail-skeleton" aria-hidden="true">
+                  {Array.from({ length: showEpisodeList ? 6 : 1 }, (_, index) => (
+                    <div className="detail-skeleton__row" key={index}>
+                      <span className="detail-skeleton__number" />
+                      <span className="detail-skeleton__title" />
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : failed ? (
+              <ErrorState
+                title={copy.details.episodeError}
+                description={error || undefined}
+                retry={onRetry}
+                retryLabel={copy.details.retry}
+              />
+            ) : orderedEpisodes.length === 0 ? (
+              <EmptyState title={copy.details.unavailable} description={copy.details.unavailableBody} />
+            ) : (
+              <ul className="detail-episode-list">
+                {orderedEpisodes.map((item) => {
+                  const available = (item.availability?.length ?? 0) > 0;
+                  const displayTitle = cleanEpisodeTitle(item.title, item.label, item.ordinal);
+                  // The number column always carries the label, so a row without a
+                  // known title shows the number once instead of repeating it as
+                  // "Episode 6" in the title column.
+                  const rowLabel = displayTitle
+                    ? `${format(copy.details.playEpisode, { label: item.label })}: ${displayTitle}`
+                    : format(copy.details.playEpisode, { label: item.label });
+                  const accessibleLabel = available
+                    ? rowLabel
+                    : `${rowLabel}, ${copy.details.episodeUnavailable}`;
+                  return (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className="detail-episode"
+                        aria-label={accessibleLabel}
+                        disabled={!available}
+                        onClick={() => onPlay(item)}
+                      >
+                        <span className="detail-episode__number tabular" aria-hidden="true">
+                          {item.label}
+                        </span>
+                        <span className="detail-episode__body" aria-hidden="true">
+                          {displayTitle ? <span className="detail-episode__title">{displayTitle}</span> : null}
+                          {available ? null : <Badge>{copy.details.episodeUnavailable}</Badge>}
+                        </span>
+                        <span className="detail-episode__play" aria-hidden="true">
+                          <Play className="detail-episode__icon" size={18} strokeWidth={1.8} />
+                          <span>{copy.details.play}</span>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        ) : null}
+      </div>
+    </div>

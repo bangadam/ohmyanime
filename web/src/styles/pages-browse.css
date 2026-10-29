@@ -1,0 +1,601 @@
+/*
+  Browse pages — Home, Search, This season, Release schedule.
+  Page-scoped classes only (.home-*, .search-*, .season-*, .schedule-*).
+  Colors, type, space and motion come from tokens.css; no local palette.
+*/
+
+/* Shared browse rhythms */
+.home-section,
+.season-body,
+.search-body,
+.schedule-body {
+  margin-block-start: var(--section-gap);
+}
+
+.home-section .notice,
+.search-results .notice,
+.season-body .notice,
+.schedule-body .notice {
+  margin-block-end: var(--space-4);
+}
+
+.home-more,
+.search-more,
+.season-more {
+  display: flex;
+  justify-content: center;
+  margin-block-start: var(--space-7);
+}
+
+.home-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+/* Home — full-bleed cinematic feature stage built from a real title */
+.home-hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--color-media);
+  color: var(--color-hero-text);
+}
+
+.home-hero-media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--color-hero-text);
+}
+
+.home-hero-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 30%;
+}
+
+.home-art-fallback {
+  opacity: 0.6;
+}
+
+.home-hero-scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, #02050BF5 0%, #02050BD9 28%, #02050B66 58%, #02050B0D 100%),
+    linear-gradient(0deg, var(--color-media) 0%, #02050B00 42%);
+}
+
+.home-hero-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  min-height: 500px;
+  padding-block: 64px 72px;
+}
+
+.home-hero-copy {
+  min-width: 0;
+  max-width: min(660px, 62%);
+}
+
+
+.home-hero-title {
+  color: var(--color-hero-text);
+  font-size: var(--font-hero);
+  font-weight: var(--weight-extrabold);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.home-hero-meta {
+  margin-block-start: var(--space-5);
+  color: var(--color-hero-text);
+  font-size: var(--font-meta);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.74;
+}
+
+.home-hero-synopsis {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 58ch;
+  margin-block-start: var(--space-4);
+  color: var(--color-hero-text);
+  line-height: var(--line-synopsis);
+  opacity: 0.84;
+}
+
+.home-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-block-start: var(--space-7);
+}
+
+.home-hero-actions .btn--secondary {
+  border-color: #E0E9F86B;
+  background: #243148;
+  color: var(--color-hero-text);
+}
+
+.home-hero-actions .btn--secondary:hover:not(:disabled) {
+  border-color: #E0E9F8A8;
+  background: #3B4F6D;
+}
+
+/* The hero stays dark in both themes, so its focus ring must use hero text. */
+.home-hero :focus-visible {
+  outline-color: var(--color-hero-text);
+}
+
+
+.home-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--section-gap);
+  padding-block: var(--space-8) var(--space-10);
+}
+
+.home-body .home-section {
+  margin-block-start: 0;
+}
+
+/* Home — continue watching */
+.home-history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: var(--space-4);
+}
+
+.home-history-card {
+  display: flex;
+  gap: var(--space-4);
+  padding-block: var(--space-3);
+}
+
+.home-history-thumb {
+  position: relative;
+  display: grid;
+  flex: 0 0 72px;
+  place-items: center;
+  align-self: start;
+  width: 72px;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: var(--radius-poster);
+  background: var(--color-raised);
+  color: var(--color-muted);
+  font-size: 0;
+}
+
+.home-history-thumb svg {
+  color: var(--color-muted);
+}
+
+.home-history-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.home-history-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.home-history-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.home-history-meta {
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+.home-history-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-start: auto;
+}
+
+/* Home — first-load skeleton, layout-stable and decorative */
+.home-hero--skeleton {
+  pointer-events: none;
+}
+
+.home-hero .home-skeleton-media,
+.home-hero .home-skeleton-line {
+  background: #E0E9F81F;
+}
+
+.home-skeleton-media {
+  position: absolute;
+  inset: 0;
+}
+
+.home-skeleton-line {
+  display: block;
+  border-radius: var(--radius-control);
+}
+
+
+.home-skeleton-line--title {
+  width: min(420px, 85%);
+  height: var(--font-page);
+  margin-block-start: var(--space-4);
+}
+
+.home-skeleton-line--body {
+  width: min(560px, 95%);
+  height: var(--space-3);
+  margin-block-start: var(--space-4);
+}
+
+.home-skeleton-line--short {
+  width: min(380px, 70%);
+  margin-block-start: var(--space-2);
+}
+
+.home-skeleton-line--action {
+  width: 220px;
+  height: var(--target-min);
+  margin-block-start: var(--space-6);
+}
+
+@media (max-width: 899px) {
+  .home-hero-inner {
+    min-height: 480px;
+    padding-block: 64px 48px;
+  }
+
+  .home-hero-copy {
+    max-width: 80%;
+  }
+
+  .home-hero-title {
+    font-size: clamp(2.25rem, 7vw, 3.5rem);
+  }
+}
+
+@media (max-width: 599px) {
+  .home-hero-inner {
+    align-items: flex-end;
+    min-height: 560px;
+    padding-block: 200px 36px;
+  }
+
+  .home-hero-copy {
+    max-width: 100%;
+  }
+
+  .home-hero-backdrop {
+    object-position: center top;
+  }
+
+  .home-hero-scrim {
+    background: linear-gradient(0deg, #02050B 0%, #02050BF0 30%, #02050B99 60%, #02050B1A 100%);
+  }
+
+  .home-hero-title {
+    font-size: clamp(2rem, 9vw, 3rem);
+  }
+
+  .home-hero-meta {
+    margin-block-start: var(--space-3);
+  }
+
+  .home-hero-actions {
+    margin-block-start: var(--space-5);
+  }
+
+  .home-hero-actions .btn {
+    flex: 1 1 140px;
+  }
+}
+
+/* Search */
+.search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.search-field {
+  min-width: 0;
+}
+
+.search-field-icon {
+  color: var(--color-muted);
+}
+
+.search-page input[type="search"]::-webkit-search-cancel-button,
+.search-page input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* This season */
+.season-filters {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(100px, 128px) minmax(160px, 220px);
+  gap: var(--space-4);
+}
+
+.season-count {
+  margin-block-end: var(--space-4);
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+/* Release schedule */
+.schedule-controls {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.schedule-local-time {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-control);
+  background: var(--color-panel);
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+.schedule-timezone {
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+.schedule-day-title {
+  margin-block-end: var(--space-4);
+  font-size: var(--font-section);
+}
+
+.schedule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.schedule-row {
+  display: grid;
+  grid-template-areas: "thumb time copy chevron";
+  grid-template-columns: 56px 156px minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+  width: 100%;
+  min-height: var(--target-min);
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-block-end: 1px solid var(--color-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  text-align: start;
+  transition: background-color var(--duration-close) var(--ease-surface);
+}
+
+@media (hover: hover) {
+  .schedule-row:hover {
+    background: var(--color-raised);
+  }
+}
+
+.schedule-thumb {
+  position: relative;
+  display: grid;
+  grid-area: thumb;
+  place-items: center;
+  width: 56px;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: var(--radius-poster);
+  background: var(--color-raised);
+  color: var(--color-muted);
+}
+
+.schedule-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.schedule-time {
+  display: flex;
+  flex-direction: column;
+  grid-area: time;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.schedule-clock {
+  font-size: var(--font-subsection);
+  font-weight: var(--weight-semibold);
+  line-height: var(--line-heading);
+}
+
+.schedule-date {
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+.schedule-copy {
+  display: flex;
+  flex-direction: column;
+  grid-area: copy;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.schedule-title {
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.schedule-episode {
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+/* The not-yet-aired warning sits directly under the row that produced it. */
+.schedule-list .notice {
+  margin-block: var(--space-2) var(--space-3);
+}
+
+.schedule-chevron {
+  grid-area: chevron;
+  color: var(--color-muted);
+}
+
+.schedule-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.schedule-skeleton-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-panel);
+  background: var(--color-panel);
+}
+
+.schedule-skeleton-thumb {
+  width: 56px;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-poster);
+  background: var(--color-raised);
+}
+
+.schedule-skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.schedule-skeleton-lines span {
+  display: block;
+  height: var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--color-raised);
+}
+
+.schedule-skeleton-lines span:last-child {
+  width: 40%;
+  height: var(--space-2);
+}
+
+
+@media (max-width: 767px) {
+  .home-history-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-more,
+  .search-more,
+  .season-more {
+    margin-block-start: var(--space-5);
+  }
+
+  .search-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .season-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .schedule-row {
+    grid-template-areas:
+      "thumb copy"
+      "thumb time";
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: var(--space-2) var(--space-3);
+    align-items: start;
+  }
+
+  .schedule-thumb {
+    width: 48px;
+  }
+
+  .schedule-clock {
+    font-size: var(--font-body);
+  }
+
+  .schedule-chevron {
+    display: none;
+  }
+
+  .schedule-skeleton-row {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .schedule-skeleton-thumb {
+    width: 48px;
+  }
+}
+
+@media (max-width: 479px) {
+
+  .home-skeleton-line--action {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .home-hero,
+  .home-history-card,
+  .schedule-row,
+  .schedule-skeleton-row {
+    border: 1px solid CanvasText;
+  }
+
+  .home-skeleton-line,
+  .schedule-skeleton-thumb,
+  .schedule-skeleton-lines span {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .schedule-row {
+    transition: none;
+  }
+}
