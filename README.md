@@ -85,6 +85,39 @@ cd .. && go build -tags release -trimpath -o bin/myanime-desktop ./cmd/desktop
 The `release` tag embeds `web/dist`, so the binary needs no asset directory and
 no dev server.
 
+### Download desktop apps
+
+Download platform files from [GitHub Releases](https://github.com/bangadam/ohmyanime/releases/latest).
+
+| Platform | Architecture | Package and requirements |
+|---|---|---|
+| macOS 12+ | Apple Silicon and Intel | Universal `.dmg`; drag the app to Applications |
+| Windows 10/11 | x64 or ARM64 | Portable `.zip`; extract and run `OhMyAnime.exe`. Requires Microsoft Edge WebView2 Runtime (included with Windows 11) |
+| Linux | x64 or ARM64 | `.deb` or `.tar.gz` with `install.sh`; requires GTK 3, WebKitGTK 4.1, and GStreamer media codecs |
+
+On Debian/Ubuntu, install the matching `.deb` with `sudo apt install ./ohmyanime_1.0.0_amd64.deb`
+(use the `arm64` file on ARM64). This also installs declared runtime dependencies.
+For other distributions, install GTK 3, WebKitGTK 4.1, and GStreamer good/bad/libav
+plugins with your package manager before using the archive's `install.sh`.
+
+Release files include `SHA256SUMS` for integrity verification. macOS packages are
+ad-hoc signed, not Apple-notarized; Windows binaries are unsigned. Your operating
+system may require explicit approval before opening them.
+
+### Package all supported platforms
+
+After building the frontend above, run:
+
+```sh
+GOFLAGS=-tags=release go run github.com/egoist/mygo/cmd/mygo@v0.7.1 build \
+  -platform darwin/universal,windows/amd64,windows/arm64,linux/amd64,linux/arm64
+```
+
+`mygo.json` pins the app identity, version, and runtime package requirements.
+Packages are written to `bin/release`. Run on macOS to create and sign the DMG;
+Windows installers additionally need NSIS. Without NSIS, distribute the generated
+Windows executable and LICENSE together in a portable ZIP.
+
 ## Access model
 
 The app opens directly without login. Library, history, progress, and preferences
@@ -137,8 +170,8 @@ The API contract is in [openapi.yaml](openapi.yaml).
 - Single local library per instance; no account separation or login sessions.
 - Provider integrations are unofficial; upstream layouts and availability change
   without notice, and a title may exist in one provider but not another.
-- The binary is unsigned. Distributing it requires your own signing and
-  notarization credentials.
+- Public releases are not Apple-notarized or Windows code-signed. Publishing
+  trusted signed releases requires your own signing and notarization credentials.
 - Review provider terms and content rights before exposing an instance publicly.
 
 ## License

@@ -1,0 +1,18 @@
+{
+  "name": "OhMyAnime",
+  "slug": "ohmyanime",
+  "identifier": "com.bangadam.ohmyanime",
+  "version": "1.0.0",
+  "main": "./cmd/desktop",
+  "out": "bin/release",
+  "resources": ["LICENSE"],
+  "macos": {
+    "minimumSystemVersion": "12.0"
+  },
+  "linux": {
+    "comment": "Anime streaming with a local watchlist and history, no account required",
+    "categories": ["AudioVideo", "Video"],
+    "depends": ["gstreamer1.0-libav", "gstreamer1.0-plugins-good", "gstreamer1.0-plugins-bad"],
+    "webview": true
+  }
+}
