@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"myanime/internal/domain"
@@ -23,6 +24,36 @@ var ErrLimit = errors.New("media capacity exceeded")
 
 const maxBody = 2 << 20
 const maxResources = 20000
+
+// mediaFailure renders the stable JSON error shape for media-proxy requests.
+// The stage names the failing pipeline step ("manifest", "segment", or
+// "session") so the player can retry only that step, and the request ID links
+// a failure to the sanitized local log. Messages are static: upstream
+// response bodies, credentials, and signed URLs never appear here.
+func mediaFailure(w http.ResponseWriter, status int, code, msg, stage string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	errBody := map[string]any{"code": code, "message": msg, "retryable": status == 429 || status >= 500}
+	if stage != "" {
+		errBody["stage"] = stage
+	}
+	requestID, e := randomID()
+	if e != nil {
+		requestID = ""
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": errBody, "requestId": requestID})
+}
+
+// resourceStage classifies a proxied resource as the master/variant manifest
+// or a media segment by URL shape, so upstream failures carry the stage the
+// player must retry.
+func resourceStage(u string) string {
+	if strings.HasSuffix(strings.ToLower(u), ".m3u8") {
+		return "manifest"
+	}
+	return "segment"
+}
 
 type Variant struct {
 	ID     string `json:"id"`
@@ -246,7 +277,7 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != "GET" && r.Method != "HEAD" {
 		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", 405)
+		mediaFailure(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed", "")
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/media/"), "/")
@@ -259,13 +290,13 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	s := m.sessions[parts[0]]
 	if s == nil {
 		m.mu.Unlock()
-		http.Error(w, "session expired", 410)
+		mediaFailure(w, 410, "SESSION_EXPIRED", "Playback session expired", "session")
 		return
 	}
 	res, ok := s.resources[parts[1]]
 	if !ok {
 		m.mu.Unlock()
-		http.NotFound(w, r)
+		mediaFailure(w, 404, "MEDIA_NOT_FOUND", "Media resource not found", "segment")
 		return
 	}
 	s.idle = time.Now().Add(30 * time.Minute)
@@ -291,7 +322,7 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	req, e := http.NewRequestWithContext(ctx, method, res.url, nil)
 	if e != nil {
-		http.Error(w, "invalid media", 502)
+		mediaFailure(w, 502, "INVALID_MEDIA", "Invalid media", resourceStage(res.url))
 		return
 	}
 	if ref, e := validURL(s.referer); e == nil {
@@ -308,7 +339,7 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, e := m.client.Do(req)
 	if e != nil {
-		http.Error(w, "upstream unavailable", 502)
+		mediaFailure(w, 502, "UPSTREAM_UNAVAILABLE", "Upstream unavailable", resourceStage(res.url))
 		return
 	}
 	defer resp.Body.Close()
@@ -317,7 +348,7 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Range", resp.Header.Get("Content-Range"))
 			w.WriteHeader(416)
 		} else {
-			http.Error(w, "upstream unavailable", 502)
+			mediaFailure(w, 502, "UPSTREAM_UNAVAILABLE", "Upstream unavailable", resourceStage(res.url))
 		}
 		return
 	}
@@ -342,19 +373,19 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	if manifest && r.Method != "HEAD" {
 		data, e := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 		if e != nil || len(data) > maxBody {
-			http.Error(w, "invalid manifest", 502)
+			mediaFailure(w, 502, "MANIFEST_INVALID", "Invalid manifest", "manifest")
 			return
 		}
 		m.mu.Lock()
 		if s.ctx.Err() != nil {
 			m.mu.Unlock()
-			http.Error(w, "session expired", 410)
+			mediaFailure(w, 410, "SESSION_EXPIRED", "Playback session expired", "session")
 			return
 		}
 		data, e = rewrite(s, resp.Request.URL, data)
 		m.mu.Unlock()
 		if e != nil {
-			http.Error(w, "invalid manifest", 502)
+			mediaFailure(w, 502, "MANIFEST_INVALID", "Invalid manifest", "manifest")
 			return
 		}
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -366,7 +397,7 @@ func (m *Manager) serve(w http.ResponseWriter, r *http.Request) {
 	if res.subtitle && r.Method != "HEAD" {
 		data, e := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 		if e != nil || validateVTT(data) != nil {
-			http.Error(w, "invalid subtitle", 502)
+			mediaFailure(w, 502, "INVALID_SUBTITLE", "Invalid subtitle", "")
 			return
 		}
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")

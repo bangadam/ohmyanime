@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"myanime/internal/domain"
+	"myanime/internal/imageproxy"
+	"myanime/internal/logging"
 	"myanime/internal/media"
 	"myanime/internal/provider"
 	"myanime/internal/store"
@@ -36,12 +38,14 @@ type Config struct {
 type App struct {
 	cfg          Config
 	db           *store.Store
-	catalog      *provider.Service
+	catalog      catalogService
 	media        *media.Manager
+	images       *imageproxy.Manager
 	token        string
 	mux          *http.ServeMux
 	trusted      []*net.IPNet
 	resolveSlots chan struct{}
+	logs         *logging.Logger
 }
 type principal struct{ owner, csrf string }
 
@@ -89,18 +93,30 @@ func New(cfg Config) (*App, error) {
 	}
 	a := &App{
 		cfg: cfg, db: db, catalog: provider.New(), media: media.New(), token: randomToken(),
-		mux: http.NewServeMux(),
+		mux:  http.NewServeMux(),
+		logs: logging.New(logging.Options{Dir: filepath.Join(cfg.DataDir, "logs")}),
 	}
 	a.trusted = proxies
 	a.resolveSlots = make(chan struct{}, 8)
+	a.images = imageproxy.New(filepath.Join(cfg.DataDir, "image-cache"), 0)
 	a.routes()
 	return a, nil
 }
 func (a *App) Bootstrap() map[string]string {
 	return map[string]string{"apiToken": a.token, "csrfToken": a.token}
 }
-func (a *App) Close() error          { a.media.Close(); a.catalog.Close(); return a.db.Close() }
+func (a *App) Close() error {
+	a.logs.Close()
+	a.media.Close()
+	a.images.Close()
+	a.catalog.Close()
+	return a.db.Close()
+}
 func (a *App) Handler() http.Handler { return http.HandlerFunc(a.serve) }
+
+// Logger returns the app's bounded, redacted local logger. It is safe to
+// use even when logging is disabled (no-op).
+func (a *App) Logger() *logging.Logger { return a.logs }
 func (a *App) secure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -198,7 +214,10 @@ func failure(w http.ResponseWriter, status int, code, msg string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": msg, "retryable": status == 429 || status >= 502}, "requestId": randomToken()[:12]})
 }
-func handleErr(w http.ResponseWriter, err error) {
+func (a *App) handleErr(w http.ResponseWriter, err error) {
+	// Recorded first so diagnostics keep a sanitized failure category even
+	// when the provider branch returns early below.
+	a.logs.Error("request_failed", "error", err)
 	var pe *provider.Error
 	if errors.As(err, &pe) {
 		status, code, msg := 502, "PROVIDER_UNAVAILABLE", "Source unavailable"
@@ -215,8 +234,14 @@ func handleErr(w http.ResponseWriter, err error) {
 			code, msg = "MALFORMED_SOURCE", "Source returned an invalid response"
 		case "invalid_mapping", "invalid_provider":
 			status, code, msg = 400, "INVALID_INPUT", "Invalid source mapping"
-		case "not_found":
-			status, code, msg = 404, "NOT_FOUND", "Resource not found"
+		// Catalogue filters are validated before any upstream call, so a
+		// rejected value is a client bug and must not read as an outage.
+		case "invalid_filter", "invalid_sort", "invalid_status", "invalid_type", "invalid_season", "invalid_cursor":
+			status, code, msg = 400, "INVALID_INPUT", "Invalid catalogue filter"
+		case "provider_disabled":
+			status, code, msg = 409, "PROVIDER_DISABLED", "This source is disabled"
+		case "no_source":
+			status, code, msg = 404, "TITLE_ABSENT", "This episode is not available from the selected source"
 		case "unsupported":
 			status, code, msg = 422, "UNSUPPORTED", "Unsupported option"
 		}
@@ -244,6 +269,8 @@ func handleErr(w http.ResponseWriter, err error) {
 		failure(w, 400, "INVALID_MEDIA", "Invalid media")
 	case errors.Is(err, media.ErrLimit):
 		failure(w, 429, "RATE_LIMITED", "Too many active media sessions")
+	case errors.Is(err, imageproxy.ErrInvalid):
+		failure(w, 502, "MALFORMED_SOURCE", "Source returned an invalid page image reference")
 	default:
 		failure(w, 502, "PROVIDER_UNAVAILABLE", "Source or storage unreachable")
 	}
@@ -301,6 +328,20 @@ func pageArgs(r *http.Request) (int, string) {
 	}
 	return n, r.URL.Query().Get("cursor")
 }
+
+// splitList flattens repeated and comma-separated query values into one list.
+// Entries are trimmed and blanks dropped; the provider owns dedupe and caps.
+func splitList(values []string) []string {
+	var out []string
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
+}
 func (a *App) routes() {
 	m := a.mux
 	m.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { reply(w, 200, map[string]string{"status": "ok"}) })
@@ -310,23 +351,55 @@ func (a *App) routes() {
 	m.HandleFunc("GET /api/v1/providers", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		reply(w, 200, map[string]any{"items": a.catalog.Providers()})
 	}))
+	// Manual health refresh: one bounded homepage probe per provider. Health
+	// describes reachability only, never a playback guarantee, and never
+	// changes enablement or the explicitly selected provider.
+	m.HandleFunc("POST /api/v1/providers/health", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		a.catalog.CheckAllHealth(ctx)
+		reply(w, 200, map[string]any{"items": a.catalog.Providers()})
+	}))
 	m.HandleFunc("GET /api/v1/catalog", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		n, c := pageArgs(r)
 		q := r.URL.Query()
 		year, _ := strconv.Atoi(q.Get("year"))
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		result, e := a.catalog.Search(ctx, domain.CatalogQuery{Query: q.Get("query"), Cursor: c, Limit: n, Genre: q.Get("genre"), Season: q.Get("season"), Year: year})
+		query := domain.CatalogQuery{
+			Query:  q.Get("query"),
+			Cursor: c,
+			Limit:  n,
+			Genres: splitList(q["genre"]),
+			Tags:   splitList(q["tag"]),
+			Status: q.Get("status"),
+			Type:   q.Get("type"),
+			Sort:   q.Get("sort"),
+			Season: q.Get("season"),
+			Year:   year,
+		}
+		key := catalogueKey("catalog", query)
+		result, e := a.catalog.Search(ctx, query)
 		if e != nil {
-			handleErr(w, e)
+			// Transient upstream failure: fall back to the last-known
+			// validated page, labelled stale, or fail honestly.
+			if transientUpstream(e) && a.serveStaleCatalogue(ctx, w, key) {
+				return
+			}
+			if transientUpstream(e) {
+				offlineCatalogue(w)
+				return
+			}
+			a.handleErr(w, e)
 			return
 		}
 		for _, anime := range result.Items {
 			if e = a.db.UpsertAnime(ctx, anime); e != nil {
-				handleErr(w, e)
+				a.handleErr(w, e)
 				return
 			}
 		}
+		a.cacheCatalogue(ctx, key, result, a.logs)
 		reply(w, 200, result)
 	}))
 	m.HandleFunc("GET /api/v1/anime/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
@@ -334,11 +407,11 @@ func (a *App) routes() {
 		defer cancel()
 		v, e := a.catalog.Detail(ctx, r.PathValue("id"))
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		if e = a.db.UpsertAnime(ctx, v); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -349,20 +422,135 @@ func (a *App) routes() {
 		id := r.PathValue("id")
 		anime, e := a.catalog.Detail(ctx, id)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		if e = a.db.UpsertAnime(ctx, anime); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		v, e := a.catalog.Episodes(ctx, id)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		if e = a.db.UpsertEpisodes(ctx, v); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, map[string]any{"items": v, "nextCursor": nil})
+	}))
+	m.HandleFunc("GET /api/v1/manga", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		n, c := pageArgs(r)
+		q := r.URL.Query()
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		var items []domain.Manga
+		var next string
+		var e error
+
+		// An explicit provider filter must never quietly fall back to every
+		// source, so the scoped path is only taken when the catalog supports it.
+		if provider := strings.TrimSpace(q.Get("provider")); provider != "" {
+			scoped, ok := a.catalog.(mangaProviderSearch)
+			if !ok {
+				a.handleErr(w, errors.New("provider filter unsupported"))
+				return
+			}
+			items, next, e = scoped.MangaSearchProvider(ctx, provider, q.Get("query"), c, n)
+		} else {
+			items, next, e = a.catalog.MangaSearch(ctx, q.Get("query"), c, n)
+		}
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		var cursor *string
+		if next != "" {
+			cursor = &next
+		}
+		reply(w, 200, map[string]any{"items": items, "nextCursor": cursor})
+	}))
+	m.HandleFunc("GET /api/v1/manga/chapters/{id}/pages", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		id := r.PathValue("id")
+		chapter, e := a.catalog.MangaChapter(ctx, id)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		pages, e := a.catalog.MangaPages(ctx, id)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		token, e := a.images.Grant(pages, 0)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		local := make([]domain.MangaPage, len(pages))
+		for i, page := range pages {
+			local[i] = domain.MangaPage{Index: page.Index, URL: "/api/v1/manga-pages/" + token + "/" + strconv.Itoa(page.Index)}
+		}
+		reply(w, 200, map[string]any{"items": local, "chapter": chapter, "mangaId": chapter.MangaID})
+	}))
+	m.HandleFunc("GET /api/v1/manga/{id}/reading-progress", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		v, e := a.db.ReadingProgress(ctx, r.PathValue("id"))
+		if errors.Is(e, store.ErrNotFound) {
+			reply(w, 200, nil)
+			return
+		}
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("PUT /api/v1/manga/{id}/reading-progress", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		var b struct {
+			ChapterID string `json:"chapterId"`
+			Page      int    `json:"page"`
+			Completed bool   `json:"completed"`
+			// ExpectedRevision carries the revision the client last saw, so a
+			// stale window cannot overwrite newer progress. Missing means
+			// "insert unconditionally" (first write).
+			ExpectedRevision *int64 `json:"expectedRevision"`
+		}
+		if !decode(w, r, &b) {
+			return
+		}
+		v, e := a.db.PutReadingProgress(r.Context(), r.PathValue("id"), store.ReadingProgressUpdate{
+			ChapterID:        b.ChapterID,
+			Page:             b.Page,
+			Completed:        b.Completed,
+			ExpectedRevision: b.ExpectedRevision,
+		})
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("GET /api/v1/manga/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		v, e := a.catalog.MangaDetail(ctx, r.PathValue("id"))
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("GET /api/v1/manga/{id}/chapters", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		v, e := a.catalog.MangaChapters(ctx, r.PathValue("id"))
+		if e != nil {
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, map[string]any{"items": v, "nextCursor": nil})
@@ -385,7 +573,7 @@ func (a *App) routes() {
 				}
 			}
 			if err != nil {
-				handleErr(w, err)
+				a.handleErr(w, err)
 				return
 			}
 			w.WriteHeader(204)
@@ -415,17 +603,21 @@ func (a *App) routes() {
 		}
 		v, e := a.media.AddSubtitle(r.PathValue("id"), p.owner, h.Filename, b)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 201, v)
 	}))
 	m.Handle("/media/", a.media.Handler())
+	// Manga page images are served unauthenticated like /media/: the
+	// unguessable capability token in the path is the authority and it
+	// expires.
+	m.Handle("/api/v1/manga-pages/", a.images.Handler())
 	m.HandleFunc("GET /api/v1/bookmarks", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		n, c := pageArgs(r)
 		v, e := a.db.Bookmarks(r.Context(), n, c)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -435,23 +627,58 @@ func (a *App) routes() {
 		if _, e := a.db.Anime(r.Context(), id); e != nil {
 			v, e := a.catalog.Detail(r.Context(), id)
 			if e != nil {
-				handleErr(w, e)
+				a.handleErr(w, e)
 				return
 			}
 			if e = a.db.UpsertAnime(r.Context(), v); e != nil {
-				handleErr(w, e)
+				a.handleErr(w, e)
 				return
 			}
 		}
 		if e := a.db.PutBookmark(r.Context(), id); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, map[string]bool{"bookmarked": true})
 	}))
 	m.HandleFunc("DELETE /api/v1/bookmarks/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		if e := a.db.DeleteBookmark(r.Context(), r.PathValue("id")); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	m.HandleFunc("GET /api/v1/manga/bookmarks", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		n, c := pageArgs(r)
+		v, e := a.db.MangaBookmarks(r.Context(), n, c)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("PUT /api/v1/manga/{id}/bookmark", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		id := r.PathValue("id")
+		if _, e := a.db.Manga(r.Context(), id); e != nil {
+			v, e := a.catalog.MangaDetail(r.Context(), id)
+			if e != nil {
+				a.handleErr(w, e)
+				return
+			}
+			if e = a.db.UpsertManga(r.Context(), v); e != nil {
+				a.handleErr(w, e)
+				return
+			}
+		}
+		if e := a.db.PutMangaBookmark(r.Context(), id); e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, map[string]bool{"bookmarked": true})
+	}))
+	m.HandleFunc("DELETE /api/v1/manga/{id}/bookmark", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		if e := a.db.DeleteMangaBookmark(r.Context(), r.PathValue("id")); e != nil {
+			a.handleErr(w, e)
 			return
 		}
 		w.WriteHeader(204)
@@ -460,7 +687,7 @@ func (a *App) routes() {
 		n, c := pageArgs(r)
 		v, e := a.db.History(r.Context(), n, c)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -471,10 +698,76 @@ func (a *App) routes() {
 			return
 		}
 		if e := a.db.ClearHistory(r.Context()); e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		w.WriteHeader(204)
+	}))
+	m.HandleFunc("GET /api/v1/continue-hidden", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		v, e := a.db.ContinueHidden(r.Context())
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, map[string][]string{"animeIds": v})
+	}))
+	m.HandleFunc("PUT /api/v1/continue-hidden/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		if e := a.db.HideContinue(r.Context(), r.PathValue("id")); e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	// Manual watched flags (issue 4.2): PUT marks an episode watched, DELETE
+	// marks it unwatched, both idempotent and without touching positions;
+	// POST /watched/bulk applies the flag to a title's real episode inventory.
+	m.HandleFunc("GET /api/v1/watched", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		animeID := r.URL.Query().Get("animeId")
+		if animeID == "" {
+			failure(w, 400, "INVALID_INPUT", "animeId is required")
+			return
+		}
+		v, e := a.db.WatchedStates(r.Context(), animeID)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, map[string]any{"animeId": animeID, "episodes": v})
+	}))
+	m.HandleFunc("PUT /api/v1/watched/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		v, e := a.db.SetWatched(r.Context(), r.PathValue("id"), true)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("DELETE /api/v1/watched/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		v, e := a.db.SetWatched(r.Context(), r.PathValue("id"), false)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, v)
+	}))
+	m.HandleFunc("POST /api/v1/watched/bulk", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		var b struct {
+			AnimeID string `json:"animeId"`
+			Watched bool   `json:"watched"`
+		}
+		if !decode(w, r, &b) {
+			return
+		}
+		if b.AnimeID == "" {
+			failure(w, 400, "INVALID_INPUT", "animeId is required")
+			return
+		}
+		n, e := a.db.SetWatchedBulk(r.Context(), b.AnimeID, b.Watched)
+		if e != nil {
+			a.handleErr(w, e)
+			return
+		}
+		reply(w, 200, map[string]any{"animeId": b.AnimeID, "watched": b.Watched, "count": n})
 	}))
 	m.HandleFunc("GET /api/v1/progress/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		v, e := a.db.Progress(r.Context(), r.PathValue("id"))
@@ -483,7 +776,7 @@ func (a *App) routes() {
 			return
 		}
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -495,7 +788,7 @@ func (a *App) routes() {
 		}
 		v, e := a.db.PutProgress(r.Context(), r.PathValue("id"), b)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -503,7 +796,7 @@ func (a *App) routes() {
 	m.HandleFunc("GET /api/v1/settings", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		v, e := a.db.Settings(r.Context())
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -521,7 +814,7 @@ func (a *App) routes() {
 		delete(b, "revision")
 		v, e := a.db.PatchSettings(r.Context(), rev, b)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
@@ -535,19 +828,20 @@ func (a *App) routes() {
 		}
 		v, e := a.db.ResetSettings(r.Context(), b.Revision)
 		if e != nil {
-			handleErr(w, e)
+			a.handleErr(w, e)
 			return
 		}
 		reply(w, 200, v)
 	}))
-	for _, name := range []string{"genres", "schedule"} {
+	for _, name := range []string{"genres", "tags", "schedule"} {
 		name := name
 		m.HandleFunc("GET /api/v1/"+name, a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 			var v any
 			var e error
-			if name == "genres" {
+			switch name {
+			case "genres":
 				if s, ok := any(a.catalog).(interface {
 					Genres(context.Context) (any, error)
 				}); ok {
@@ -555,7 +849,15 @@ func (a *App) routes() {
 				} else {
 					e = errors.New("genres unavailable")
 				}
-			} else {
+			case "tags":
+				if s, ok := any(a.catalog).(interface {
+					Tags(context.Context) (any, error)
+				}); ok {
+					v, e = s.Tags(ctx)
+				} else {
+					e = errors.New("tags unavailable")
+				}
+			default:
 				if s, ok := any(a.catalog).(interface {
 					Schedule(context.Context) (any, error)
 				}); ok {
@@ -565,12 +867,36 @@ func (a *App) routes() {
 				}
 			}
 			if e != nil {
-				handleErr(w, e)
+				// Transient upstream failure: serve the last-known payload
+				// labelled stale, or fail honestly with no cache.
+				if transientUpstream(e) {
+					if name == "schedule" {
+						if a.serveStaleSchedule(ctx, w) {
+							return
+						}
+					} else if a.serveStaleFacet(ctx, w, name) {
+						return
+					}
+					offlineCatalogue(w)
+					return
+				}
+				a.handleErr(w, e)
 				return
 			}
+			a.cacheCatalogue(ctx, "app:"+name, v, a.logs)
 			reply(w, 200, v)
 		}))
 	}
+	// Diagnostics: a deliberately safe, user-initiated troubleshooting
+	// report. Nothing is copied or exported without an explicit action in
+	// the interface; the report contains no credentials, signed media URLs
+	// or personal history.
+	m.HandleFunc("GET /api/v1/diagnostics", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		a.diagnostics(w, r)
+	}))
+	m.HandleFunc("POST /api/v1/diagnostics/open-log-folder", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
+		a.openLogFolderHandler(w, r)
+	}))
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { failure(w, 404, "NOT_FOUND", "Endpoint not found") })
 	m.HandleFunc("/", a.frontend)
 }
@@ -595,7 +921,7 @@ func (a *App) resolve(w http.ResponseWriter, r *http.Request, p principal) {
 	defer cancel()
 	s, e := a.catalog.Resolve(ctx, b)
 	if e != nil {
-		handleErr(w, e)
+		a.writePlaybackFailure(w, e)
 		return
 	}
 	scheme := "http"
@@ -604,7 +930,7 @@ func (a *App) resolve(w http.ResponseWriter, r *http.Request, p principal) {
 	}
 	v, e := a.media.Create(ctx, s, p.owner, scheme+"://"+r.Host)
 	if e != nil {
-		handleErr(w, e)
+		a.writePlaybackFailure(w, e)
 		return
 	}
 	reply(w, 201, v)

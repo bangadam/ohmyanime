@@ -65,3 +65,13 @@ func secureClient() *http.Client {
 		return e
 	}}
 }
+
+// SafeClient returns an HTTP client with the shared safe transport:
+// SSRF-guarded dialing (private and non-unicast destinations refused),
+// a bounded redirect policy, and bounded timeouts. Callers own the client
+// and should CloseIdleConnections when done.
+func SafeClient() *http.Client { return secureClient() }
+
+// ValidateHTTPS enforces the shared upstream URL policy: https only, no
+// userinfo, no fragment, and no port other than the default.
+func ValidateHTTPS(raw string) error { _, e := validURL(raw); return e }

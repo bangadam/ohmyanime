@@ -212,7 +212,8 @@ func TestProviderTypedErrors(t *testing.T) {
 		status int
 	}{{"timeout", 504}, {"rate_limited", 429}, {"invalid_mapping", 400}, {"forbidden", 502}} {
 		w := httptest.NewRecorder()
-		handleErr(w, &provider.Error{Code: tc.code, Provider: "https://secret.example/token", RetryAfter: 1500 * time.Millisecond})
+		a := authApp(t, "web")
+		a.handleErr(w, &provider.Error{Code: tc.code, Provider: "https://secret.example/token", RetryAfter: 1500 * time.Millisecond})
 		if w.Code != tc.status || strings.Contains(w.Body.String(), "secret.example") {
 			t.Fatal(w.Code, w.Body.String())
 		}

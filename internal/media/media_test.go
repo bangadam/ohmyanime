@@ -212,3 +212,43 @@ func TestSessionVariantCapability(t *testing.T) {
 		t.Fatal("variant capability or source metadata missing")
 	}
 }
+
+// Media-proxy failures carry the stable JSON shape with the failing stage and
+// a request ID, so the player can retry only the failed step.
+func TestStagedMediaFailures(t *testing.T) {
+	m, s := fixture(t)
+	st := m.sessions[m.ids[s.ID]]
+	if _, e := st.register("https://cdn.example/media.m3u8", false); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := st.register("https://cdn.example/seg0.ts", false); e != nil {
+		t.Fatal(e)
+	}
+	token := m.ids[s.ID]
+	h := m.Handler()
+	// Unknown session: session stage.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/media/unknown-token/1", nil))
+	if w.Code != 410 || !strings.Contains(w.Body.String(), `"stage":"session"`) || !strings.Contains(w.Body.String(), `"requestId"`) {
+		t.Fatalf("unknown session: %d %s", w.Code, w.Body.String())
+	}
+	// Unknown resource inside a live session: segment-stage media miss.
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/media/"+token+"/99", nil))
+	if w.Code != 404 || !strings.Contains(w.Body.String(), `"stage":"segment"`) {
+		t.Fatalf("unknown resource: %d %s", w.Code, w.Body.String())
+	}
+	// Upstream failure: the stage follows the resource kind, manifest or
+	// segment, and the failure is retryable.
+	m.client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 502, Status: "502 Bad Gateway", Header: http.Header{}, Body: io.NopCloser(strings.NewReader("nope"))}, nil
+	})
+	for _, tc := range []struct{ path, stage string }{{"/media/" + token + "/1", "manifest"}, {"/media/" + token + "/3", "segment"}} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", tc.path, nil))
+		body := w.Body.String()
+		if w.Code != 502 || !strings.Contains(body, `"stage":"`+tc.stage+`"`) || !strings.Contains(body, `"retryable":true`) || !strings.Contains(body, "UPSTREAM_UNAVAILABLE") {
+			t.Fatalf("%s: %d %s", tc.path, w.Code, body)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,60 @@ func TestHTTPProgressBookmarksHistoryContract(t *testing.T) {
 		t.Fatalf("bookmark delete: %+v", bookmarks)
 	}
 }
+func TestHTTPWatchedContract(t *testing.T) {
+	c := newContractClient(t)
+	// Per-episode mark: watched without any progress row (no invented duration).
+	p := contractData[store.Progress](t, c.request("PUT", "/watched/episode-a", "", 200))
+	if !p.Completed || p.DurationSeconds != nil || p.PositionSeconds != 0 || p.EpisodeID != "episode-a" {
+		t.Fatalf("watched: %+v", p)
+	}
+	// Idempotent.
+	c.request("PUT", "/watched/episode-a", "", 200)
+	// Unknown episode rejected.
+	c.request("PUT", "/watched/missing", "", 404)
+	c.request("DELETE", "/watched/missing", "", 404)
+	// A bulk action for a title with no stored inventory is an idempotent
+	// no-op (count 0): bulk never invents episodes for unknown titles.
+	c.request("POST", "/watched/bulk", `{"animeId":"missing","watched":true}`, 200)
+	c.request("POST", "/watched/bulk", `{"watched":true}`, 400)
+	c.request("POST", "/watched/bulk", `{"animeId":"anime-b","watched":true,"extra":1}`, 400)
+	c.request("GET", "/watched", "", 400)
+	// Bulk watched only affects the selected title.
+	bulk := contractData[struct {
+		AnimeID string `json:"animeId"`
+		Watched bool   `json:"watched"`
+		Count   int    `json:"count"`
+	}](t, c.request("POST", "/watched/bulk", `{"animeId":"anime-b","watched":true}`, 200))
+	if bulk.Count != 1 || !bulk.Watched || bulk.AnimeID != "anime-b" {
+		t.Fatalf("bulk: %+v", bulk)
+	}
+	states := contractData[struct {
+		Episodes []store.WatchedState `json:"episodes"`
+	}](t, c.request("GET", "/watched?animeId=anime-b", "", 200))
+	if len(states.Episodes) != 1 || states.Episodes[0].EpisodeID != "episode-b" || !states.Episodes[0].Watched {
+		t.Fatalf("bulk states: %+v", states)
+	}
+	// Other title untouched.
+	states = contractData[struct {
+		Episodes []store.WatchedState `json:"episodes"`
+	}](t, c.request("GET", "/watched?animeId=anime-a", "", 200))
+	if len(states.Episodes) != 1 || !states.Episodes[0].Watched {
+		t.Fatalf("bulk leaked into anime-a: %+v", states)
+	}
+	// Unwatch (episode-a had a manual watch, not progress).
+	p = contractData[store.Progress](t, c.request("DELETE", "/watched/episode-a", "", 200))
+	if p.Completed {
+		t.Fatalf("unwatch: %+v", p)
+	}
+	// Bulk unwatch is consistent undo.
+	c.request("POST", "/watched/bulk", `{"animeId":"anime-b","watched":false}`, 200)
+	states = contractData[struct {
+		Episodes []store.WatchedState `json:"episodes"`
+	}](t, c.request("GET", "/watched?animeId=anime-b", "", 200))
+	if len(states.Episodes) != 1 || states.Episodes[0].Watched {
+		t.Fatalf("bulk unwatch: %+v", states)
+	}
+}
 func TestHTTPErrorEnvelopeContract(t *testing.T) {
 	c := newContractClient(t)
 	for _, path := range []string{"/bookmarks?cursor=bad", "/history?cursor=-1"} {
@@ -260,5 +315,71 @@ func TestHTTPConfirmedCleanupContract(t *testing.T) {
 	}
 	for _, path := range []string{"/bookmarks?limit=0", "/history?limit=51", "/bookmarks?limit=bad"} {
 		c.request("GET", path, "", 400)
+	}
+}
+
+func TestHTTPProvidersHealthContract(t *testing.T) {
+	c := newContractClient(t)
+	// Listing providers must surface health without probing anything:
+	// the state starts unknown with no checkedAt.
+	list := contractData[struct {
+		Items []domain.ProviderInfo `json:"items"`
+	}](t, c.request("GET", "/providers", "", 200))
+	if len(list.Items) == 0 {
+		t.Fatal("no providers listed")
+	}
+	for _, p := range list.Items {
+		if p.Health.State != "unknown" {
+			t.Fatalf("provider %s health = %q before any probe, want unknown", p.ID, p.Health.State)
+		}
+		if !p.Health.CheckedAt.IsZero() {
+			t.Fatalf("provider %s unexpectedly probed at %v", p.ID, p.Health.CheckedAt)
+		}
+	}
+	// Manual refresh probes real homepages, so it is a live smoke check:
+	// skipped unless explicitly opted in, keeping the default suite offline.
+	if os.Getenv("PROBE_SMOKE_NETWORK") == "" {
+		t.Skip("set PROBE_SMOKE_NETWORK=1 to exercise a live health refresh")
+	}
+	// shape with a state and checkedAt for each entry, whatever the network
+	// outcome is. Offline test machines still get a bounded result.
+	refreshed := contractData[struct {
+		Items []domain.ProviderInfo `json:"items"`
+	}](t, c.request("POST", "/providers/health", "", 200))
+	if len(refreshed.Items) != len(list.Items) {
+		t.Fatalf("refresh returned %d items, want %d", len(refreshed.Items), len(list.Items))
+	}
+	for _, p := range refreshed.Items {
+		if p.Health.State == "" || p.Health.State == "unknown" {
+			t.Fatalf("provider %s health = %q after refresh, want a probed state", p.ID, p.Health.State)
+		}
+		if p.Health.CheckedAt.IsZero() {
+			t.Fatalf("provider %s refresh result missing checkedAt", p.ID)
+		}
+		if !p.Enabled {
+			t.Fatalf("provider %s disabled by health refresh", p.ID)
+		}
+	}
+}
+
+// Invalid catalogue filters are rejected by provider-side validation before
+// any upstream request, so this contract test stays offline. They must answer
+// 400 rather than masquerading as a provider outage.
+func TestHTTPCatalogueInvalidFiltersContract(t *testing.T) {
+	c := newContractClient(t)
+	for _, path := range []string{
+		"/catalog?sort=bogus",
+		"/catalog?status=bogus",
+		"/catalog?type=bogus",
+		"/catalog?season=bogus",
+		"/catalog?cursor=0",
+	} {
+		env := c.request("GET", path, "", 400)
+		if env.Error.Code != "INVALID_INPUT" {
+			t.Fatalf("%s: code %q, want INVALID_INPUT", path, env.Error.Code)
+		}
+		if env.Error.Retryable {
+			t.Fatalf("%s: invalid input marked retryable", path)
+		}
 	}
 }
