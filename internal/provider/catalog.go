@@ -5,13 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"myanime/internal/domain"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const metadataURL = "https://graphql.anilist.co"
-const mediaFields = `id idMal title { romaji english native } synonyms coverImage { large } description format season seasonYear status`
+const mediaFields = `id idMal title { romaji english native } synonyms coverImage { large } description format season seasonYear status genres tags { name rank isMediaSpoiler }`
+
+type mediaTag struct {
+	Name           string
+	Rank           int
+	IsMediaSpoiler bool `json:"isMediaSpoiler"`
+}
 
 type media struct {
 	ID                                  int
@@ -21,6 +28,8 @@ type media struct {
 	CoverImage                          struct{ Large string }
 	Description, Format, Season, Status string
 	SeasonYear                          int
+	Genres                              []string
+	Tags                                []mediaTag
 }
 
 func (m media) anime() domain.Anime {
@@ -34,7 +43,57 @@ func (m media) anime() domain.Anime {
 			aliases = append(aliases, t)
 		}
 	}
-	return domain.Anime{ID: fmt.Sprintf("anilist:%d", m.ID), Title: title, AlternativeTitles: aliases, PosterURL: m.CoverImage.Large, Synopsis: plain(m.Description), Type: m.Format, Season: strings.ToLower(m.Season), Year: m.SeasonYear, Status: m.Status, Availability: []string{}}
+	return domain.Anime{ID: fmt.Sprintf("anilist:%d", m.ID), Title: title, AlternativeTitles: aliases, PosterURL: m.CoverImage.Large, Synopsis: plain(m.Description), Type: m.Format, Season: strings.ToLower(m.Season), Year: m.SeasonYear, Status: m.Status, Genres: normalizeTerms(m.Genres, 0), Tags: animeTags(m.Tags), Availability: []string{}}
+}
+
+// normalizeTerms trims values, drops empty and repeated ones (case-insensitive,
+// first spelling wins) and caps the result at limit (0 means no cap).
+func normalizeTerms(in []string, limit int) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		key := strings.ToLower(v)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+		if limit > 0 && len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
+// animeTags drops spoiler and low-rank tags: spoiler tags leak plot, and
+// low-rank tags are shared noise that would bloat every title payload. The rest
+// are ordered by relevance and capped so payloads stay small.
+func animeTags(in []mediaTag) []string {
+	tags := make([]mediaTag, 0, len(in))
+	for _, t := range in {
+		if t.IsMediaSpoiler || t.Rank < animeTagRankFloor || t.Name == "" {
+			continue
+		}
+		tags = append(tags, t)
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		if tags[i].Rank != tags[j].Rank {
+			return tags[i].Rank > tags[j].Rank
+		}
+		return tags[i].Name < tags[j].Name
+	})
+	if len(tags) > maxAnimeTags {
+		tags = tags[:maxAnimeTags]
+	}
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, t.Name)
+	}
+	return out
 }
 func (s *Service) graphql(ctx context.Context, q string, vars map[string]any, out any) error {
 	b, e := s.request(ctx, "POST", metadataURL, "", map[string]any{"query": q, "variables": vars}, nil)
@@ -53,50 +112,160 @@ func (s *Service) graphql(ctx context.Context, q string, vars map[string]any, ou
 	}
 	return nil
 }
-func (s *Service) Search(ctx context.Context, q domain.CatalogQuery) (domain.CatalogPage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
-	out := domain.CatalogPage{Items: []domain.Anime{}}
+
+const (
+	animeTagRankFloor      = 60
+	maxAnimeTags           = 20
+	maxCatalogTerms        = 10
+	defaultCatalogPageSize = 24
+	maxCatalogPageSize     = 50
+	maxCatalogPageNumber   = 10000
+)
+
+// catalogStatuses and catalogFormats travel as GraphQL variables, so their
+// tokens only need to be valid enum members.
+var catalogStatuses = map[string]string{
+	"releasing":        "RELEASING",
+	"finished":         "FINISHED",
+	"not_yet_released": "NOT_YET_RELEASED",
+	"cancelled":        "CANCELLED",
+	"hiatus":           "HIATUS",
+}
+
+var catalogFormats = map[string]string{
+	"tv":       "TV",
+	"tv_short": "TV_SHORT",
+	"movie":    "MOVIE",
+	"special":  "SPECIAL",
+	"ova":      "OVA",
+	"ona":      "ONA",
+	"music":    "MUSIC",
+}
+
+var catalogSeasons = map[string]string{"WINTER": "WINTER", "SPRING": "SPRING", "SUMMER": "SUMMER", "FALL": "FALL"}
+
+// catalogSorts keeps the request token next to its upstream enum: the sort is
+// interpolated as a literal because GraphQL cannot bind an enum through a
+// variable, so the value must already be an allowlisted token.
+var catalogSorts = map[string]string{
+	domain.CatalogSortPopular:   "POPULARITY_DESC",
+	domain.CatalogSortTrending:  "TRENDING_DESC",
+	domain.CatalogSortScore:     "SCORE_DESC",
+	domain.CatalogSortNewest:    "START_DATE_DESC",
+	domain.CatalogSortUpdated:   "UPDATED_AT_DESC",
+	domain.CatalogSortTitleAsc:  "TITLE_ROMAJI",
+	domain.CatalogSortTitleDesc: "TITLE_ROMAJI_DESC",
+}
+
+// enumToken validates a request value against an allowlist. Empty means the
+// filter is absent; anything unknown fails before a request is made.
+func enumToken(value string, allowed map[string]string, code string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if token, ok := allowed[value]; ok {
+		return token, nil
+	}
+	return "", failure(code, "catalog")
+}
+
+// catalogQuery builds the AniList document and variables for one request.
+// Only filters that are set are declared, since GraphQL rejects unused
+// variables. Genre and tag lists reach upstream as genre_in/tag_in, which ANDs
+// their entries.
+func catalogQuery(q domain.CatalogQuery) (string, map[string]any, error) {
 	page := 1
 	if q.Cursor != "" {
-		n, e := strconv.Atoi(q.Cursor)
-		if e != nil || n < 1 || n > 10000 {
-			return out, failure("invalid_cursor", "catalog")
+		n, err := strconv.Atoi(q.Cursor)
+		if err != nil || n < 1 || n > maxCatalogPageNumber {
+			return "", nil, failure("invalid_cursor", "catalog")
 		}
 		page = n
 	}
 	limit := q.Limit
 	if limit < 1 {
-		limit = 24
+		limit = defaultCatalogPageSize
 	}
-	if limit > 50 {
-		limit = 50
+	if limit > maxCatalogPageSize {
+		limit = maxCatalogPageSize
 	}
+	sortToken, err := enumToken(q.Sort, catalogSorts, "invalid_sort")
+	if err != nil {
+		return "", nil, err
+	}
+	if sortToken == "" {
+		sortToken = catalogSorts[domain.CatalogSortPopular]
+	}
+	status, err := enumToken(q.Status, catalogStatuses, "invalid_status")
+	if err != nil {
+		return "", nil, err
+	}
+	format, err := enumToken(q.Type, catalogFormats, "invalid_type")
+	if err != nil {
+		return "", nil, err
+	}
+	season, err := enumToken(strings.ToUpper(q.Season), catalogSeasons, "invalid_season")
+	if err != nil {
+		return "", nil, err
+	}
+	decls := []string{"$page:Int", "$perPage:Int"}
+	args := []string{"type:ANIME", "isAdult:false"}
 	vars := map[string]any{"page": page, "perPage": limit}
 	if q.Query != "" {
+		decls = append(decls, "$search:String")
+		args = append(args, "search:$search")
 		vars["search"] = q.Query
 	}
-	if q.Genre != "" {
-		vars["genre"] = q.Genre
+	if status != "" {
+		decls = append(decls, "$status:MediaStatus")
+		args = append(args, "status:$status")
+		vars["status"] = status
 	}
-	if q.Season != "" {
-		season := strings.ToUpper(q.Season)
-		if season != "WINTER" && season != "SPRING" && season != "SUMMER" && season != "FALL" {
-			return out, failure("invalid_season", "catalog")
-		}
+	if format != "" {
+		decls = append(decls, "$format:MediaFormat")
+		args = append(args, "format:$format")
+		vars["format"] = format
+	}
+	if genres := normalizeTerms(q.Genres, maxCatalogTerms); len(genres) > 0 {
+		decls = append(decls, "$genres:[String]")
+		args = append(args, "genre_in:$genres")
+		vars["genres"] = genres
+	}
+	if tags := normalizeTerms(q.Tags, maxCatalogTerms); len(tags) > 0 {
+		decls = append(decls, "$tags:[String]")
+		args = append(args, "tag_in:$tags")
+		vars["tags"] = tags
+	}
+	if season != "" {
+		decls = append(decls, "$season:MediaSeason")
+		args = append(args, "season:$season")
 		vars["season"] = season
 	}
 	if q.Year > 0 {
+		decls = append(decls, "$year:Int")
+		args = append(args, "seasonYear:$year")
 		vars["year"] = q.Year
 	}
-	query := `query($page:Int,$perPage:Int,$search:String,$genre:String,$season:MediaSeason,$year:Int){Page(page:$page,perPage:$perPage){pageInfo{hasNextPage} media(type:ANIME,isAdult:false,search:$search,genre:$genre,season:$season,seasonYear:$year,sort:POPULARITY_DESC){` + mediaFields + `}}}`
+	args = append(args, "sort:"+sortToken)
+	document := `query(` + strings.Join(decls, ",") + `){Page(page:$page,perPage:$perPage){pageInfo{hasNextPage} media(` + strings.Join(args, ",") + `){` + mediaFields + `}}}`
+	return document, vars, nil
+}
+
+func (s *Service) Search(ctx context.Context, q domain.CatalogQuery) (domain.CatalogPage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	out := domain.CatalogPage{Items: []domain.Anime{}}
+	document, vars, err := catalogQuery(q)
+	if err != nil {
+		return out, err
+	}
 	var result struct {
 		Page struct {
 			PageInfo struct{ HasNextPage bool }
 			Media    []media
 		}
 	}
-	if e := s.graphql(ctx, query, vars, &result); e != nil {
+	if e := s.graphql(ctx, document, vars, &result); e != nil {
 		return out, e
 	}
 	for _, m := range result.Page.Media {
@@ -106,6 +275,7 @@ func (s *Service) Search(ctx context.Context, q domain.CatalogQuery) (domain.Cat
 		s.putCache("mal:"+a.ID, m.IDMal, nil, 24*time.Hour)
 	}
 	if result.Page.PageInfo.HasNextPage {
+		page, _ := vars["page"].(int)
 		v := strconv.Itoa(page + 1)
 		out.NextCursor = &v
 	}
@@ -143,6 +313,61 @@ func (s *Service) Genres(ctx context.Context) (any, error) {
 		}
 	}
 	return map[string]any{"items": items}, nil
+}
+
+// mediaTagEntry is one entry of the upstream tag vocabulary. The collection's
+// rank is null upstream (rank only exists per media), so the vocabulary must be
+// filtered by its spoiler and adult flags instead.
+type mediaTagEntry struct {
+	Name             string
+	Category         string
+	IsAdult          bool `json:"isAdult"`
+	IsGeneralSpoiler bool `json:"isGeneralSpoiler"`
+	IsMediaSpoiler   bool `json:"isMediaSpoiler"`
+}
+
+// tagVocabulary keeps the facet list free of adult and spoiler tags: the
+// catalogue is not adult-filtered, and a spoiler tag offered as a filter would
+// either leak plot or always return zero titles, because per-title tag mapping
+// drops spoilers. Category rides on the vocabulary entry rather than on every
+// title so per-title payloads stay small.
+func tagVocabulary(in []mediaTagEntry) []map[string]string {
+	type tag struct{ name, category string }
+	seen := make(map[string]bool, len(in))
+	tags := make([]tag, 0, len(in))
+	for _, t := range in {
+		if t.IsAdult || t.IsGeneralSpoiler || t.IsMediaSpoiler || t.Name == "" {
+			continue
+		}
+		key := strings.ToLower(t.Name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		tags = append(tags, tag{name: t.Name, category: t.Category})
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		if tags[i].category != tags[j].category {
+			return tags[i].category < tags[j].category
+		}
+		return tags[i].name < tags[j].name
+	})
+	items := make([]map[string]string, 0, len(tags))
+	for _, t := range tags {
+		items = append(items, map[string]string{"id": t.name, "name": t.name, "category": t.category})
+	}
+	return items
+}
+
+// Tags lists the upstream tag vocabulary for catalogue facets.
+func (s *Service) Tags(ctx context.Context) (any, error) {
+	var result struct {
+		MediaTagCollection []mediaTagEntry
+	}
+	if e := s.graphql(ctx, `{MediaTagCollection{name category isAdult isGeneralSpoiler isMediaSpoiler}}`, nil, &result); e != nil {
+		return nil, e
+	}
+	return map[string]any{"items": tagVocabulary(result.MediaTagCollection)}, nil
 }
 func (s *Service) Schedule(ctx context.Context) (any, error) {
 	now := time.Now().Unix()

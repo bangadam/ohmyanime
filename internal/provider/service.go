@@ -43,11 +43,13 @@ type Service struct {
 	cache     map[string]entry
 	enabled   map[string]bool
 	cooldown  map[string]time.Time
+	health    map[string]Health
 	sessionMu sync.Mutex
 	token     string
 	expiry    time.Time
 	keys      [3]string
 	keysAt    time.Time
+	reg       *registry
 }
 
 var _ domain.Catalog = (*Service)(nil)
@@ -65,7 +67,19 @@ func New() *Service {
 		}
 		return validateURL(r.URL)
 	}}
-	return &Service{client: c, cache: map[string]entry{}, enabled: map[string]bool{"hianime": true, "otakudesu": true, "anichan": true}, cooldown: map[string]time.Time{}}
+	s := &Service{client: c, cache: map[string]entry{}, enabled: map[string]bool{}, cooldown: map[string]time.Time{}, health: map[string]Health{}, reg: newRegistry()}
+	// Registration is the only wiring an in-process adapter needs.
+	for _, adapter := range []AnimeProvider{newHianime(s), newOtakudesu(s), newAnichan(s)} {
+		if e := s.RegisterAnime(adapter); e != nil {
+			panic("provider: register " + adapter.Identity().ID + ": " + e.Error())
+		}
+	}
+	for _, adapter := range []MangaProvider{newMangadex(s), newMangafire(s), newComix(s)} {
+		if e := s.RegisterManga(adapter); e != nil {
+			panic("provider: register " + adapter.Identity().ID + ": " + e.Error())
+		}
+	}
+	return s
 }
 func publicDial(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, e := net.SplitHostPort(address)
@@ -106,7 +120,7 @@ func (s *Service) Refresh() {
 func (s *Service) SetEnabled(p string, on bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.enabled[p]; !ok {
+	if !s.reg.known(p) {
 		return failure("invalid_provider", p)
 	}
 	s.enabled[p] = on
@@ -117,18 +131,103 @@ func (s *Service) Providers() []domain.ProviderInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.ProviderInfo{}
-	for _, p := range []string{"hianime", "otakudesu", "anichan"} {
-		m := []string{"sub", "dub"}
-		if p == "otakudesu" {
-			m = []string{"sub"}
-		}
+	for _, p := range s.reg.animeProviders() {
+		id := p.Identity().ID
 		status := "unverified"
-		if !s.enabled[p] {
+		if !s.enabled[id] {
 			status = "disabled"
 		}
-		out = append(out, domain.ProviderInfo{ID: p, Enabled: s.enabled[p], Modes: m, Status: status})
+		out = append(out, domain.ProviderInfo{
+			ID:           id,
+			Enabled:      s.enabled[id],
+			Modes:        p.Modes(),
+			Status:       status,
+			Capabilities: providerCapabilities(animeCapabilities(p)),
+			Health:       providerHealth(s.health[id]),
+		})
+	}
+	// Manga adapters share the same identity space, so they belong in the same
+	// list. They carry no audio modes; reader formats come from capabilities.
+	for _, p := range s.reg.mangaProviders() {
+		id := p.Identity().ID
+		status := "unverified"
+		if !s.enabled[id] {
+			status = "disabled"
+		}
+		out = append(out, domain.ProviderInfo{
+			ID:           id,
+			Enabled:      s.enabled[id],
+			Modes:        []string{},
+			Status:       status,
+			Capabilities: providerCapabilities(mangaCapabilities(p)),
+			Health:       providerHealth(s.health[id]),
+		})
 	}
 	return out
+}
+
+// providerCapabilities projects a typed provider-level capability declaration
+// onto the wire shape without implying any title-level availability.
+func providerCapabilities(c Capabilities) domain.ProviderCapabilities {
+	out := domain.ProviderCapabilities{
+		Kinds:         make([]string, 0, len(c.Kinds)),
+		AudioModes:    make([]string, 0, len(c.AudioModes)),
+		ReaderFormats: make([]string, 0, len(c.ReaderFormats)),
+	}
+	for _, k := range c.Kinds {
+		out.Kinds = append(out.Kinds, string(k))
+	}
+	for _, m := range c.AudioModes {
+		out.AudioModes = append(out.AudioModes, string(m))
+	}
+	for _, f := range c.ReaderFormats {
+		out.ReaderFormats = append(out.ReaderFormats, string(f))
+	}
+	return out
+}
+
+// providerHealth projects the recorded health probe, defaulting to unknown.
+func providerHealth(h Health) domain.ProviderHealth {
+	if h.State == "" {
+		return domain.ProviderHealth{State: string(HealthUnknown)}
+	}
+	return domain.ProviderHealth{
+		State:     string(h.State),
+		CheckedAt: h.CheckedAt,
+		Reason:    h.Reason,
+	}
+}
+
+// RegisterAnime adds an in-process anime adapter. Registration is the only
+// step needed for search, inventory and playback to reach it.
+func (s *Service) RegisterAnime(p AnimeProvider) error {
+	if e := s.reg.registerAnime(p); e != nil {
+		return e
+	}
+	s.mu.Lock()
+	s.enabled[p.Identity().ID] = true
+	s.mu.Unlock()
+	return nil
+}
+
+// RegisterManga adds an in-process manga adapter and enables it.
+func (s *Service) RegisterManga(p MangaProvider) error {
+	if e := s.reg.registerManga(p); e != nil {
+		return e
+	}
+	s.mu.Lock()
+	s.enabled[p.Identity().ID] = true
+	s.mu.Unlock()
+	return nil
+}
+
+// animeProviders lists registered anime adapters in registration order.
+func (s *Service) animeProviders() []AnimeProvider { return s.reg.animeProviders() }
+
+func (s *Service) isEnabled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled[id]
 }
 func (s *Service) getCache(k string) (entry, bool) {
 	s.mu.Lock()

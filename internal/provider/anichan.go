@@ -92,7 +92,8 @@ func (s *Service) aniResolve(ctx context.Context, id, label, mode string) (domai
 		}
 	}
 	if !matched {
-		return domain.Source{}, failure("invalid_mapping", "anichan")
+		// Episode absence at this provider, distinct from a timeout or outage.
+		return domain.Source{}, failure("no_source", "anichan")
 	}
 	token, e := s.aniSession(ctx, false)
 	if e != nil {

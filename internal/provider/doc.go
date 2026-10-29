@@ -7,6 +7,19 @@
 // slugs remain internal, with unique exact normalized full-title/alias matching;
 // normalization retains all season, part, cour and numeral information.
 //
+// Sources implement the AnimeProvider or MangaProvider contracts, which share
+// one provider identity (id, name, kind), and register in-process in a
+// registry: adding an adapter is a registration call, never an edit to a
+// resolver branch. Caching, cancellation, enablement and explicit provider
+// selection stay in Service orchestration.
+
+// Provider-level capabilities (media kinds, audio modes, and reader formats
+// for manga) are typed declarations on the adapter contracts, strictly
+// separate from episode/chapter availability and from the subtitle/audio
+// tracks a playback session discovers. An undeclared capability is never
+// inferred or offered, and a declared dub mode never promises any specific
+// title has one.
+//
 // Episode titles come from one AniZip mappings request per title, keyed by
 // AniList ID and matched to provider labels by exact number (en, then x-jat,
 // then ja). Provider anchor text that only restates the number is discarded so
@@ -23,6 +36,17 @@
 // MAL identity, never title guessing. The lookup has a shared 1.8 second deadline
 // and cannot fail playback; decimal/special labels are not rounded for AniSkip.
 // Catalog planned counts are not accepted as AniChan playback availability.
+//
+// Manga reading resolves through MangaProvider adapters. MangaDex serves its
+// documented public JSON API without authentication: manga search and detail,
+// an English-chapter feed, and at-home page URLs. Application manga IDs are
+// mangadex:<uuid>; chapter identity uses domain.ChapterKey (volume, decimal
+// number, special, language) so "12" and "12.5" never collide. Numberless
+// releases carry a synthetic "oneshot" special. Chapters with no hosted pages
+// (official external links) are dropped rather than zeroed. Covers are
+// upstream CDN thumbnails; page URLs come from one at-home server response
+// and are size/count bounded like every other upstream payload.
+//
 // Close releases idle HTTP connections during application shutdown.
 // Subtitle language uses explicit label/code mappings, preferring recognized
 // human labels over misleading CDN language fields. Unknown language is und;

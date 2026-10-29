@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
+	"errors"
 	"io"
 	"myanime/internal/domain"
 	"net/http"
@@ -74,7 +75,11 @@ func TestGCMAuthentication(t *testing.T) {
 }
 func TestHiEpisodeHTMLPreservesLabels(t *testing.T) {
 	s := fixtureService(`{"html":"<a data-id=\"10\" data-number=\"12.5\">Recap</a><a data-number=\"SP1\" data-id=\"11\">Special</a>"}`)
-	eps, e := s.providerEpisodes(context.Background(), "hianime", "show-123")
+	hi, ok := s.reg.lookupAnime("hianime")
+	if !ok {
+		t.Fatal("hianime not registered")
+	}
+	eps, e := hi.Episodes(context.Background(), "show-123")
 	if e != nil || len(eps) != 2 {
 		t.Fatalf("episodes %v %v", eps, e)
 	}
@@ -212,9 +217,11 @@ func TestMatchCandidatePrefersExactOverQualifiedCard(t *testing.T) {
 		{slug: "jujutsu-kaisen-season-2-415", title: "Jujutsu Kaisen 2nd Season"},
 		{slug: "jujutsu-kaisen-0-413", title: "Jujutsu Kaisen 0 Movie"},
 	}
-	slug, ok := matchCandidate(found, a)
-	if !ok || slug != "jujutsu-kaisen-237" {
-		t.Fatalf("got %q %v", slug, ok)
+	for _, rules := range []matchRules{hianimeRulesForTest, otakudesuRulesForTest} {
+		slug, ok := matchCandidate(found, a, rules)
+		if !ok || slug != "jujutsu-kaisen-237" {
+			t.Fatalf("got %q %v", slug, ok)
+		}
 	}
 }
 
@@ -224,8 +231,10 @@ func TestMatchCandidateRefusesAmbiguity(t *testing.T) {
 		{slug: "a", title: "Jujutsu Kaisen"},
 		{slug: "b", title: "Jujutsu Kaisen"},
 	}
-	if slug, ok := matchCandidate(found, a); ok {
-		t.Fatalf("ambiguous cards resolved to %q", slug)
+	for _, rules := range []matchRules{hianimeRulesForTest, otakudesuRulesForTest} {
+		if slug, ok := matchCandidate(found, a, rules); ok {
+			t.Fatalf("ambiguous cards resolved to %q", slug)
+		}
 	}
 }
 
@@ -235,18 +244,116 @@ func TestMatchCandidateUsesAlternativeTitles(t *testing.T) {
 		{slug: "attack-on-titan-240", title: "Attack on Titan"},
 		{slug: "attack-on-titan-season-2-865", title: "Attack on Titan Season 2"},
 	}
-	if slug, ok := matchCandidate(found, a); !ok || slug != "attack-on-titan-240" {
+	if slug, ok := matchCandidate(found, a, hianimeRulesForTest); !ok || slug != "attack-on-titan-240" {
 		t.Fatalf("got %q %v", slug, ok)
 	}
 }
 
+// Season two must never map to season one, in either direction: the season
+// number is part of the work's identity, not a provider qualifier.
+func TestSeasonTwoNeverMapsToSeasonOne(t *testing.T) {
+	season1 := domain.Anime{ID: "anilist:101", Title: "Jujutsu Kaisen"}
+	season2 := domain.Anime{ID: "anilist:102", Title: "Jujutsu Kaisen 2nd Season"}
+	season2Alt := domain.Anime{ID: "anilist:103", Title: "Jujutsu Kaisen", AlternativeTitles: []string{"Jujutsu Kaisen Season 2"}}
+	for _, rules := range []matchRules{hianimeRulesForTest, otakudesuRulesForTest} {
+		if _, ok := matchCandidate([]candidate{{slug: "s1", title: "Jujutsu Kaisen"}}, season2, rules); ok {
+			t.Fatal("season 2 anime mapped to a season 1 card")
+		}
+		if _, ok := matchCandidate([]candidate{{slug: "s1", title: "Jujutsu Kaisen (TV)"}}, season2Alt, rules); ok {
+			t.Fatal("season 2 alias mapped to a season 1 card")
+		}
+		if _, ok := matchCandidate([]candidate{{slug: "s2", title: "Jujutsu Kaisen 2nd Season"}}, season1, rules); ok {
+			t.Fatal("season 1 anime mapped to a season 2 card")
+		}
+		// The same season still resolves to its own card.
+		if slug, ok := matchCandidate([]candidate{{slug: "s2", title: "Jujutsu Kaisen 2nd Season"}}, season2, rules); !ok || slug != "s2" {
+			t.Fatalf("season 2 self-match: %q %v", slug, ok)
+		}
+	}
+	// Numeric season wording is identity too.
+	if _, ok := matchCandidate([]candidate{{slug: "s1", title: "Jujutsu Kaisen"}}, domain.Anime{ID: "anilist:104", Title: "Jujutsu Kaisen 2"}, hianimeRulesForTest); ok {
+		t.Fatal("numeric season 2 mapped to season 1")
+	}
+}
+
+// Each adapter owns its qualifier list: a suffix Otakudesu treats as noise
+// stays meaningful under HiAnime's rules.
+func TestMatchRulesArePerAdapter(t *testing.T) {
+	a := domain.Anime{ID: "anilist:1", Title: "Jujutsu Kaisen"}
+	// "BD" is an Otakudesu release variant; HiAnime cards never carry it as
+	// a non-identity suffix, so HiAnime must not strip it.
+	bd := []candidate{{slug: "bd", title: "Jujutsu Kaisen BD"}}
+	if _, ok := matchCandidate(bd, a, hianimeRulesForTest); ok {
+		t.Fatal("hianime stripped a suffix only otakudesu knows")
+	}
+	if slug, ok := matchCandidate(bd, a, otakudesuRulesForTest); !ok || slug != "bd" {
+		t.Fatalf("otakudesu BD card: %q %v", slug, ok)
+	}
+	// Both providers mark TV cards "(TV)".
+	tv := []candidate{{slug: "tv", title: "Jujutsu Kaisen (TV)"}}
+	for _, rules := range []matchRules{hianimeRulesForTest, otakudesuRulesForTest} {
+		if slug, ok := matchCandidate(tv, a, rules); !ok || slug != "tv" {
+			t.Fatalf("TV card with %v: %q %v", rules, slug, ok)
+		}
+	}
+}
+
+// Decimal and special episode labels are distinct identities: 12.5 never
+// resolves to 12, and duplicate labels stay unresolved.
+func TestDecimalAndSpecialEpisodeIdentity(t *testing.T) {
+	eps := parseEpisodes([]byte(`{"html":"<a data-id=\"12\" data-number=\"12\">Ep 12</a><a data-id=\"125\" data-number=\"12.5\">Recap</a><a data-id=\"ova\" data-number=\"OVA\">OVA</a>"}`), "", hiEpisodeCard)
+	if ep, ok := matchEpisode(eps, "12.5"); !ok || ep.key != "125" {
+		t.Fatalf("12.5 resolved to %q ok=%v", ep.key, ok)
+	}
+	if ep, ok := matchEpisode(eps, "12"); !ok || ep.key != "12" {
+		t.Fatalf("12 resolved to %q ok=%v", ep.key, ok)
+	}
+	if ep, ok := matchEpisode(eps, "OVA"); !ok || ep.key != "ova" {
+		t.Fatalf("OVA resolved to %q ok=%v", ep.key, ok)
+	}
+	if _, ok := matchEpisode(eps, "13"); ok {
+		t.Fatal("resolved a label the provider does not have")
+	}
+	// Two cards claiming the same label are ambiguous: never guess.
+	dup := append(eps, providerEpisode{label: "12.5", key: "dup"})
+	if _, ok := matchEpisode(dup, "12.5"); ok {
+		t.Fatal("duplicate 12.5 label resolved")
+	}
+}
+
+var (
+	hianimeRulesForTest   = newHianime(New()).rules
+	otakudesuRulesForTest = newOtakudesu(New()).rules
+)
+
 func TestParseCandidatesPerProvider(t *testing.T) {
-	hi := parseCandidates("hianime", []byte(`<h3 class="film-name"><a href="https://hianime.at/jujutsu-kaisen-237" title="Jujutsu Kaisen">Jujutsu Kaisen</a></h3><a href="https://hianime.at/no-id" title="No id">No id</a>`))
+	hi := parseHiCandidates([]byte(`<h3 class="film-name"><a href="https://hianime.at/jujutsu-kaisen-237" title="Jujutsu Kaisen">Jujutsu Kaisen</a></h3><a href="https://hianime.at/no-id" title="No id">No id</a>`))
 	if len(hi) != 1 || hi[0].slug != "jujutsu-kaisen-237" || hi[0].title != "Jujutsu Kaisen" {
 		t.Fatalf("hianime %v", hi)
 	}
-	ot := parseCandidates("otakudesu", []byte(`<a class="ot-k" href="https://ww2.otakudesu.biz/anime/jujutsu-kaisen-tv-6i3h8t6/"><h2 class="ot-k-j">Jujutsu Kaisen (TV)</h2></a>`))
+	ot := parseOtakuCandidates([]byte(`<a class="ot-k" href="https://ww2.otakudesu.biz/anime/jujutsu-kaisen-tv-6i3h8t6/"><h2 class="ot-k-j">Jujutsu Kaisen (TV)</h2></a>`))
 	if len(ot) != 1 || ot[0].slug != "jujutsu-kaisen-tv-6i3h8t6" || ot[0].title != "Jujutsu Kaisen (TV)" {
 		t.Fatalf("otakudesu %v", ot)
+	}
+}
+
+// An explicit provider that simply lacks the episode is actionable: the
+// upstream answered, so the caller must see no_source rather than a
+// retryable failure. Everything needed is cached, so any transport call is a
+// bug.
+func TestResolveTitleAbsenceIsNoSource(t *testing.T) {
+	s := New()
+	const id = "anilist:5"
+	s.putCache("anime:"+id, domain.Anime{ID: id, Title: "Test"}, nil, time.Hour)
+	s.putCache("mapping:hianime:"+id, "test-5", nil, time.Hour)
+	s.putCache("episodes:hianime:test-5", []providerEpisode{{label: "1", key: "a", title: "Episode 1", ordinal: 1}}, nil, time.Hour)
+	s.client.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("title absence must not contact the network")
+		return nil, nil
+	})
+	_, e := s.Resolve(context.Background(), domain.ResolveRequest{AnimeID: id, EpisodeID: episodeID(id, "9"), Mode: "sub", Provider: "hianime"})
+	var pe *Error
+	if !errors.As(e, &pe) || pe.Code != "no_source" {
+		t.Fatalf("resolve error %v", e)
 	}
 }
