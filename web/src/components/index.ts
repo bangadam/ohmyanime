@@ -20,3 +20,5 @@ export {
   Badge,
 } from "./ui";
 export type { ButtonProps, TextFieldProps, SelectFieldProps } from "./ui";
+export { TagChips } from "./TagChips";
+export type { TagChipsProps } from "./TagChips";

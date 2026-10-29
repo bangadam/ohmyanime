@@ -3,6 +3,7 @@ import {
   Button,
   EmptyState,
   ErrorState,
+  FilterChips,
   IconButton,
   Notice,
   PageHeader,
@@ -12,8 +13,14 @@ import {
   TextField,
 } from "../components";
 import { copy, format } from "../copy";
-import type { SearchPageProps } from "../types";
+import type { SearchKind, SearchPageProps } from "../types";
 import "../styles/pages-browse.css";
+
+const KINDS: { value: SearchKind; label: string }[] = [
+  { value: "all", label: copy.search.kindAll },
+  { value: "anime", label: copy.search.kindAnime },
+  { value: "manga", label: copy.search.kindManga },
+];
 
 export default function Search(props: SearchPageProps) {
   const {
@@ -23,9 +30,16 @@ export default function Search(props: SearchPageProps) {
     onSubmit,
     onClear,
     results,
+    mangaResults,
+    kind,
+    onKind,
+    mangaProvider,
+    onMangaProvider,
+    mangaProviderOptions,
     loading,
     loadingMore,
     error,
+    stale,
     searched,
     hasMore,
     onOpen,
@@ -34,7 +48,12 @@ export default function Search(props: SearchPageProps) {
   } = props;
   const trimmedQuery = query.trim();
   const hasQuery = trimmedQuery.length > 0;
-  const hasResults = results.length > 0;
+  // The kind filter only switches which datasets are visible; anime and manga
+  // ids are namespaced, so same-title results from both sources stay separate
+  // cards with separate identities.
+  const animeResults = kind === "manga" ? [] : results;
+  const mangaShown = kind === "anime" ? [] : mangaResults;
+  const visibleCount = animeResults.length + mangaShown.length;
 
   return (
     <div className="container page search-page">
@@ -81,16 +100,16 @@ export default function Search(props: SearchPageProps) {
       <div className="search-body" aria-busy={loading || loadingMore}>
         {!hasQuery ? (
           <EmptyState title={copy.search.emptyQueryTitle} description={copy.search.emptyQueryBody} />
-        ) : loading && !hasResults ? (
+        ) : loading && visibleCount === 0 ? (
           <SkeletonGrid count={6} label={copy.search.loading} />
-        ) : error && !hasResults ? (
+        ) : error && visibleCount === 0 ? (
           <ErrorState
             title={copy.search.errorTitle}
             description={error}
             retry={onRetry}
             retryLabel={copy.states.retry}
           />
-        ) : searched && !hasResults ? (
+        ) : searched && visibleCount === 0 ? (
           <EmptyState
             title={format(copy.search.noResultsFor, { query: trimmedQuery })}
             description={copy.search.recovery}
@@ -100,13 +119,34 @@ export default function Search(props: SearchPageProps) {
               </Button>
             }
           />
-        ) : hasResults ? (
-          <section className="search-results">
-            <SectionHeader title={copy.search.results} />
+        ) : visibleCount > 0 ? (
+          <div className="search-results">
+            <FilterChips<SearchKind>
+              label={copy.search.kindFilterLabel}
+              value={kind}
+              options={KINDS}
+              onChange={onKind}
+            />
+            {/*
+              The provider filter only affects manga, so it stays next to the
+              kind filter and preserves the aggregated view by default.
+            */}
+            {kind !== "anime" && mangaProviderOptions.length > 1 ? (
+              <FilterChips<string>
+                label={copy.manga.providerFilterLabel}
+                value={mangaProvider}
+                options={mangaProviderOptions}
+                onChange={onMangaProvider}
+              />
+            ) : null}
+            {/*
+              Partial failure: a failed source surfaces as a notice while the
+              successful kind stays visible below.
+            */}
             {error ? (
               <Notice
                 tone="error"
-                message={error}
+                message={copy.search.partialError}
                 action={
                   <Button variant="quiet" onClick={onRetry}>
                     {copy.states.retry}
@@ -114,11 +154,37 @@ export default function Search(props: SearchPageProps) {
                 }
               />
             ) : null}
-            <div className="poster-grid">
-              {results.map((anime) => (
-                <PosterCard key={anime.id} anime={anime} onOpen={() => onOpen(anime)} />
-              ))}
-            </div>
+            {stale ? (
+              <Notice
+                tone="status"
+                message={copy.states.staleCatalogue}
+                action={
+                  <Button variant="quiet" onClick={onRetry}>
+                    {copy.states.retry}
+                  </Button>
+                }
+              />
+            ) : null}
+            {animeResults.length > 0 ? (
+              <section className="search-results">
+                <SectionHeader title={copy.search.animeResults} />
+                <div className="poster-grid">
+                  {animeResults.map((anime) => (
+                    <PosterCard key={anime.id} anime={anime} kind="anime" onOpen={() => onOpen(anime, "anime")} />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {mangaShown.length > 0 ? (
+              <section className="search-results">
+                <SectionHeader title={copy.manga.results} />
+                <div className="poster-grid">
+                  {mangaShown.map((manga) => (
+                    <PosterCard key={manga.id} anime={manga} kind="manga" onOpen={() => onOpen(manga, "manga")} />
+                  ))}
+                </div>
+              </section>
+            ) : null}
             {hasMore ? (
               <div className="search-more">
                 <Button variant="secondary" onClick={onLoadMore} busy={loadingMore} disabled={loadingMore}>
@@ -131,7 +197,7 @@ export default function Search(props: SearchPageProps) {
                 ) : null}
               </div>
             ) : null}
-          </section>
+          </div>
         ) : (
           <EmptyState title={copy.search.emptyQueryTitle} description={copy.search.emptyQueryBody} />
         )}

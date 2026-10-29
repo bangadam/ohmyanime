@@ -318,18 +318,29 @@ export function PosterCard({
   onOpen,
   footer,
   action,
+  kind,
   priority = false,
 }: {
   anime: Anime;
   onOpen: () => void;
   footer?: ReactNode;
   action?: ReactNode;
+  /** Library kind badge; omit on anime-only surfaces. */
+  kind?: "anime" | "manga";
   priority?: boolean;
 }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const showArtwork = Boolean(anime.posterUrl) && failedUrl !== anime.posterUrl;
-  const meta = metaLine([animeTypeLabel(anime.type), anime.year, animeStatusLabel(anime.status)]);
+  const meta = metaLine([
+    kind ? (kind === "manga" ? copy.list.manga : copy.list.anime) : null,
+    animeTypeLabel(anime.type),
+    anime.year,
+    animeStatusLabel(anime.status),
+  ]);
   const openLabel = format(copy.home.viewDetails + ": {title}", { title: anime.title });
+  // Cover art is requested without a Referer: MangaDex answers hotlinked
+  // requests with a "read this on MangaDex" placeholder, while the other
+  // sources return identical bytes either way.
 
   return (
     <article className="poster-card">
@@ -348,7 +359,7 @@ export function PosterCard({
               loading={priority ? "eager" : "lazy"}
               decoding="async"
               fetchPriority={priority ? "high" : "auto"}
-              onError={() => setFailedUrl(anime.posterUrl ?? null)}
+              referrerPolicy="no-referrer"
             />
           ) : (
             <span className="poster-card__fallback" aria-hidden="true">

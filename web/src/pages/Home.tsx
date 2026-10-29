@@ -1,4 +1,4 @@
-import { Film, History, Info, Play } from "lucide-react";
+import { Film, History, Info, Play, X } from "lucide-react";
 import { mediaURL, type Anime, type HistoryItem } from "../api";
 import {
   Button,
@@ -72,10 +72,16 @@ interface ContinueWatchingProps {
   items: HistoryItem[];
   onOpen: (anime: Anime, episodeId?: string) => void;
   onViewHistory: () => void;
+  onRemove: (item: HistoryItem) => void;
 }
 
-/** One card per title, newest first; the caller hides this when history is empty. */
-function ContinueWatching({ items, onOpen, onViewHistory }: ContinueWatchingProps) {
+/**
+ * One card per title, newest first; the caller hides this when history is
+ * empty. "Remove from Continue watching" only hides the title from this shelf:
+ * the watch history entry and saved playback position stay intact, and the
+ * backend clears the hide as soon as the title is watched again.
+ */
+function ContinueWatching({ items, onOpen, onViewHistory, onRemove }: ContinueWatchingProps) {
   return (
     <section className="home-section" aria-labelledby="home-continue-title">
       <SectionHeader
@@ -127,6 +133,14 @@ function ContinueWatching({ items, onOpen, onViewHistory }: ContinueWatchingProp
                   >
                     {copy.home.resume}
                   </Button>
+                  <Button
+                    variant="quiet"
+                    icon={<X aria-hidden="true" size={16} />}
+                    aria-label={copy.home.removeFromContinue + ": " + item.anime.title}
+                    onClick={() => onRemove(item)}
+                  >
+                    {copy.home.removeFromContinue}
+                  </Button>
                 </div>
               </div>
             </li>
@@ -169,8 +183,10 @@ export default function Home(props: HomePageProps) {
     loading,
     loadingMore,
     error,
+    stale,
     hasMore,
     onOpen,
+    onRemoveFromContinue,
     onViewSeason,
     onViewHistory,
     onLoadMore,
@@ -225,7 +241,7 @@ export default function Home(props: HomePageProps) {
 
       <div className="container home-body">
         {continueItems.length > 0 ? (
-          <ContinueWatching items={continueItems} onOpen={onOpen} onViewHistory={onViewHistory} />
+          <ContinueWatching items={continueItems} onOpen={onOpen} onViewHistory={onViewHistory} onRemove={onRemoveFromContinue} />
         ) : null}
 
         {catalogue.length > 0 || loading ? (
@@ -235,6 +251,17 @@ export default function Home(props: HomePageProps) {
               <Notice
                 tone="error"
                 message={error}
+                action={
+                  <Button variant="quiet" onClick={onRetry}>
+                    {copy.states.retry}
+                  </Button>
+                }
+              />
+            ) : null}
+            {stale ? (
+              <Notice
+                tone="status"
+                message={copy.states.staleCatalogue}
                 action={
                   <Button variant="quiet" onClick={onRetry}>
                     {copy.states.retry}

@@ -1,0 +1,94 @@
+/*
+  Manga pages — search grid reuse, detail overlay, and chapter list.
+  Tokens only; logical properties; reduced motion safe. Class prefixes: .manga-*.
+  Grid, search form, and detail hero reuse the shared browse/library classes.
+*/
+
+/* Detail — tag row under the synopsis */
+.manga-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block: 0 var(--space-4);
+}
+
+/* Chapter list rows (newest first, list order drives reader navigation) */
+.manga-chapter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.manga-chapter {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  inline-size: 100%;
+  padding: var(--space-3) var(--space-2);
+  border: 0;
+  border-block-end: 1px solid var(--color-line);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.manga-chapter:hover {
+  background-color: var(--color-panel);
+}
+
+.manga-chapter__number {
+  flex: none;
+  min-inline-size: 5ch;
+  color: var(--color-muted);
+  font-size: var(--font-control);
+  font-weight: var(--weight-semibold);
+}
+
+.manga-chapter__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 0;
+}
+
+.manga-chapter__title {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.manga-chapter__meta {
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+}
+
+.manga-chapter__read {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--color-muted);
+  font-size: var(--font-control);
+  visibility: hidden;
+}
+
+.manga-chapter:hover .manga-chapter__read,
+.manga-chapter:focus-visible .manga-chapter__read {
+  visibility: visible;
+}
+
+@media (max-width: 767px) {
+  .manga-chapter {
+    gap: var(--space-3);
+  }
+
+  .manga-chapter__read {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manga-chapter,
+  .manga-chapter:hover {
+    transition: none;
+  }
+}

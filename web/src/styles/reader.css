@@ -1,0 +1,390 @@
+/*
+  Immersive manga reader — full-bleed reading stage with a compact sticky
+  header. The stage always renders on the dark media token, so reader chrome
+  deliberately uses the theme-invariant media tokens (--color-hero-text,
+  --color-media, --overlay-chip, --scrim-player-top), mirroring the player.
+*/
+
+.reader {
+  --reader-gutter: clamp(16px, 2.8vw, 48px);
+  --reader-page-max: 900px;
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-player);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-media);
+  color: var(--color-hero-text);
+  font-size: var(--font-control);
+  color-scheme: dark;
+  isolation: isolate;
+}
+
+.reader:focus-visible,
+.reader :focus-visible {
+  outline: var(--focus-width) solid var(--color-hero-text);
+  outline-offset: var(--focus-offset);
+}
+
+/* Sticky compact header: back, chapter label + title, page counter, prev/next */
+.reader-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block: max(var(--space-3), env(safe-area-inset-top));
+  padding-inline: max(var(--reader-gutter), env(safe-area-inset-left)) max(var(--reader-gutter), env(safe-area-inset-right));
+  background: var(--scrim-player-top);
+}
+
+.reader-bar__back,
+.reader-bar__chapter {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--player-target);
+  block-size: var(--player-target);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-hero-text);
+  cursor: pointer;
+}
+
+.reader-bar__back svg {
+  inline-size: 24px;
+  block-size: 24px;
+}
+
+.reader-bar__chapter svg {
+  inline-size: 22px;
+  block-size: 22px;
+}
+
+.reader-bar__back:hover,
+.reader-bar__chapter:hover:not(:disabled) {
+  background: var(--overlay-chip);
+}
+
+.reader-bar__chapter:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.reader-bar__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 0;
+}
+
+.reader-bar__manga {
+  margin: 0;
+  font-size: clamp(0.75rem, 0.95vw, 0.9375rem);
+  line-height: 1.4;
+  opacity: 0.82;
+  overflow-wrap: anywhere;
+}
+
+.reader-bar__label {
+  margin: 0;
+  font-size: clamp(1rem, 1.4vw, 1.25rem);
+  font-weight: var(--weight-bold);
+  line-height: 1.2;
+  letter-spacing: var(--tracking-tight);
+  overflow-wrap: anywhere;
+}
+
+.reader-bar__count {
+  margin: 0;
+  flex: none;
+  font-size: var(--font-meta);
+  opacity: 0.82;
+}
+
+.reader-bar__heading + .reader-bar__count {
+  margin-inline-start: auto;
+}
+
+.reader-bar__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Chapter picker: dropdown anchored under the caret in the nav group. The
+   list uses the media tokens so it reads as reader chrome. */
+.reader-bar__pick {
+  position: relative;
+}
+
+.reader-bar__chapters {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  inset-inline-end: 0;
+  margin: 0;
+  padding: var(--space-1);
+  list-style: none;
+  max-block-size: 60vh;
+  overflow-y: auto;
+  min-inline-size: 14rem;
+  background: var(--color-media);
+  border: 1px solid var(--overlay-chip);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 1;
+}
+
+.reader-bar__chapter-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  inline-size: 100%;
+  padding: var(--space-1) var(--space-2);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--color-hero-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.reader-bar__chapter-option[aria-current="true"] {
+  background: var(--overlay-chip);
+}
+
+.reader-bar__chapter-option:disabled {
+  color: var(--color-hero-text-muted, var(--color-hero-text));
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.reader-bar__chapter-label {
+  flex-shrink: 0;
+}
+
+.reader-bar__chapter-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.reader-bar__chapter-flag {
+  margin-inline-start: auto;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  opacity: 0.6;
+}
+
+/* Explicit end-of-chapter action under the final page / spread */
+.reader-end {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2);
+  color: var(--color-hero-text);
+}
+
+/* Scrollable page column */
+.reader-scroll {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--color-track) var(--color-media);
+}
+
+.reader-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-4) max(var(--space-8), env(safe-area-inset-bottom));
+  padding-inline: max(var(--space-3), env(safe-area-inset-left)) max(var(--space-3), env(safe-area-inset-right));
+}
+
+.reader-page {
+  display: block;
+  inline-size: 100%;
+  max-inline-size: var(--reader-page-max);
+  block-size: auto;
+}
+
+/* Loading and error states center in the reading column */
+.reader-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  min-block-size: 60dvh;
+  padding: var(--gutter);
+  text-align: center;
+}
+
+.reader-error {
+  margin: 0;
+  max-width: 42ch;
+  color: var(--color-hero-text);
+  overflow-wrap: anywhere;
+}
+
+.reader-status__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+/* Reading-mode controls in the sticky header */
+.reader-bar__modes {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-inline-start: auto;
+}
+
+.reader-bar__heading + .reader-bar__count {
+  margin-inline-start: auto;
+}
+
+.reader-bar__heading + .reader-bar__count + .reader-bar__modes {
+  margin-inline-start: 0;
+}
+
+.reader-bar__toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: var(--player-target);
+  block-size: var(--player-target);
+  padding-inline: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-hero-text);
+  font-size: var(--font-meta);
+  cursor: pointer;
+}
+
+.reader-bar__toggle svg {
+  inline-size: 18px;
+  block-size: 18px;
+}
+
+.reader-bar__toggle:hover:not(:disabled),
+.reader-bar__toggle[aria-pressed="true"] {
+  background: var(--overlay-chip);
+}
+
+.reader-bar__toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Strip slots carry the zoom so images scale from their center */
+.reader-pages__slot {
+  inline-size: 100%;
+  max-inline-size: calc(var(--reader-page-max) * var(--reader-zoom, 1));
+}
+
+.reader-pages__slot .reader-page {
+  transition: none;
+}
+
+.reader-page--placeholder {
+  min-block-size: 40dvh;
+  border-radius: var(--radius-control);
+  background: var(--overlay-chip);
+}
+
+/* Paged stage: one spread centered on the screen */
+.reader-stage {
+  flex: 1;
+  min-block-size: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: var(--space-4);
+  scrollbar-color: var(--color-track) var(--color-media);
+}
+
+.reader-stage__spread {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.reader-stage--rtl .reader-stage__spread {
+  flex-direction: row-reverse;
+}
+
+.reader-stage--fit-width .reader-page,
+.reader-pages--fit-width .reader-page {
+  inline-size: 100%;
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+.reader-stage--fit-height .reader-page {
+  block-size: 100%;
+  max-block-size: calc(100dvh - 88px);
+  inline-size: auto;
+  max-inline-size: none;
+}
+
+.reader-pages--fit-height .reader-page {
+  inline-size: auto;
+  max-inline-size: none;
+  block-size: auto;
+}
+
+.reader-stage__spread .reader-page {
+  max-inline-size: calc(var(--reader-page-max) * var(--reader-zoom, 1));
+  transform: scale(var(--reader-zoom, 1));
+  transform-origin: center;
+}
+
+/* Per-page failure with inline retry */
+.reader-page-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  min-block-size: 40dvh;
+  inline-size: 100%;
+  max-inline-size: var(--reader-page-max);
+  padding: var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--overlay-chip);
+  text-align: center;
+}
+
+.reader-page-failed p {
+  margin: 0;
+  color: var(--color-hero-text);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .reader-bar__count {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-bar__back,
+  .reader-bar__chapter {
+    transition: none;
+  }
+}

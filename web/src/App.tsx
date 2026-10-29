@@ -5,26 +5,48 @@ import {
   errorMessage,
   id,
   initialize,
+  mangaChapters as fetchMangaChapters,
+  refreshProvidersHealth,
   json,
   type Anime,
   type Episode,
   type HistoryItem,
+  type Manga,
+  type MangaChapter,
   type Page,
   type Provider,
+  type ReadingProgress,
   type Settings,
 } from "./api";
+import { onTitleLink, type TitleLink } from "./deeplink";
 import { copy } from "./copy";
-import type { ListFilter, ListSort, LoadState, NavKey, ScheduleEntry } from "./types";
+import { catalogFiltersKey, defaultCatalogFilters, parseCatalogHash, serializeCatalogHash } from "./filters-url";
+import type {
+  CatalogFilters,
+  Genre,
+  LibraryEntry,
+  ListFilter,
+  ListSort,
+  LoadState,
+  NavKey,
+  ScheduleEntry,
+  SearchKind,
+  Tag,
+} from "./types";
 import { AppShell, ConfirmDialog, ErrorState, Notice, Spinner } from "./components";
 import Home from "./pages/Home";
 import Search from "./pages/Search";
-import Season from "./pages/Season";
+import Browse from "./pages/Browse";
 import Schedule from "./pages/Schedule";
 import Details from "./pages/Details";
 import MyList from "./pages/MyList";
-import History from "./pages/History";
 import Preferences from "./pages/Preferences";
+import History from "./pages/History";
+
 import { Player } from "./Player";
+import MangaPage from "./pages/Manga";
+import MangaDetail from "./pages/MangaDetail";
+import { Reader } from "./Reader";
 import { focusElement, isAbortError, localTimeZoneLabel } from "./utils";
 import { useThemeController } from "./theme";
 import "./styles/app.css";
@@ -43,7 +65,7 @@ const seasons = ["winter", "spring", "summer", "fall"] as const;
 type BootState = "loading" | "ready" | "error";
 type NoticeState = { message: string; tone: "status" | "error" } | null;
 type ConfirmKind = "history" | "list" | "cache" | null;
-type Genre = { id: string; name: string };
+
 
 function currentSeason(): string {
   return seasons[Math.min(3, Math.max(0, Math.floor(new Date().getMonth() / 3)))];
@@ -62,7 +84,7 @@ export default function App() {
   // Startup and shell
   const [bootState, setBootState] = useState<BootState>("loading");
   const [bootError, setBootError] = useState("");
-  const [view, setView] = useState<NavKey>("home");
+  const [view, setView] = useState<NavKey>(() => (parseCatalogHash(window.location.hash) ? "browse" : "home"));
   const [notice, setNotice] = useState<NoticeState>(null);
   const [confirmKind, setConfirmKind] = useState<ConfirmKind>(null);
   const [theme, setTheme] = useThemeController();
@@ -75,6 +97,8 @@ export default function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [providerHealthBusy, setProviderHealthBusy] = useState(false);
+  const [providerHealthError, setProviderHealthError] = useState("");
   const [genres, setGenres] = useState<Genre[]>([]);
 
   // Title detail overlay and player
@@ -87,6 +111,8 @@ export default function App() {
   const [mode, setMode] = useState("sub");
   const [bookmarked, setBookmarked] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
+  const [watched, setWatched] = useState<Record<string, boolean>>({});
+  const [watchedBusy, setWatchedBusy] = useState(false);
   const [autoplayEpisode, setAutoplayEpisode] = useState<string | null>(null);
 
   // Home
@@ -97,6 +123,7 @@ export default function App() {
   const [homeLoadingMore, setHomeLoadingMore] = useState(false);
   const [homeError, setHomeError] = useState("");
 
+  const [homeStale, setHomeStale] = useState(false);
   // Search
   const [queryInput, setQueryInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -106,25 +133,82 @@ export default function App() {
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
   const [searchError, setSearchError] = useState("");
 
-  // This season
-  const [season, setSeason] = useState(currentSeason);
-  const [year, setYear] = useState(() => new Date().getFullYear());
-  const [genre, setGenre] = useState("");
-  const [seasonItems, setSeasonItems] = useState<Anime[]>([]);
-  const [seasonCursor, setSeasonCursor] = useState<string | null>(null);
-  const [seasonLoading, setSeasonLoading] = useState(false);
-  const [seasonLoadingMore, setSeasonLoadingMore] = useState(false);
-  const [seasonError, setSeasonError] = useState("");
+  const [searchStale, setSearchStale] = useState(false);
+  // Unified search: manga results ride alongside anime results so one failed
+  // source can never hide the other kind's successful results.
+  const [searchKind, setSearchKind] = useState<SearchKind>("all");
+  const [searchMangaResults, setSearchMangaResults] = useState<Manga[]>([]);
+  const [searchMangaCursor, setSearchMangaCursor] = useState<string | null>(null);
+  // Manga search (empty query returns popular titles)
+  const [mangaQueryInput, setMangaQueryInput] = useState("");
+  const [mangaQuery, setMangaQuery] = useState("");
+  // Provider filter for manga searches. "all" keeps the aggregated view; any
+  // other value scopes the request, and pagination follows that provider.
+  const [mangaProvider, setMangaProvider] = useState("all");
+  const [mangaResults, setMangaResults] = useState<Manga[]>([]);
+  const [mangaCursor, setMangaCursor] = useState<string | null>(null);
+  const [mangaLoading, setMangaLoading] = useState(false);
+  const [mangaLoadingMore, setMangaLoadingMore] = useState(false);
+  const [mangaError, setMangaError] = useState("");
 
+  // Only providers that actually declare manga support become filter options,
+  // so the control can never offer a source that cannot answer the query.
+  const mangaProviderOptions = [
+    { value: "all", label: copy.manga.providerAll },
+    ...providers
+      .filter((item) => item.capabilities?.kinds?.includes("manga"))
+      .map((item) => ({ value: item.id, label: item.id.charAt(0).toUpperCase() + item.id.slice(1) })),
+  ];
+
+  // Manga detail overlay and reader
+  const [mangaDetail, setMangaDetail] = useState<Manga | null>(null);
+  const [mangaChapters, setMangaChapters] = useState<MangaChapter[]>([]);
+  const [mangaResume, setMangaResume] = useState<string | null>(null);
+  const [mangaDetailState, setMangaDetailState] = useState<LoadState>("idle");
+  const [mangaDetailError, setMangaDetailError] = useState("");
+  // Deep links: the desktop shell emits an allowlisted title link; until
+  // startup completes the newest link is held and dispatched once ready, so
+  // cold and warm launches take the same path.
+  const [pendingTitleLink, setPendingTitleLink] = useState<TitleLink | null>(null);
+  const [mangaChapter, setMangaChapter] = useState<MangaChapter | null>(null);
+  const [mangaBookmarked, setMangaBookmarked] = useState(false);
+  const [mangaBookmarkBusy, setMangaBookmarkBusy] = useState(false);
+
+
+
+  // Catalogue browse: the draft is edited in the filter panel while the
+  // applied copy drives requests, so typing never re-queries the catalogue.
+  // The hash is read once on mount so a reload restores the same view.
+  const [filters, setFilters] = useState<CatalogFilters>(
+    () => parseCatalogHash(window.location.hash) ?? defaultCatalogFilters(),
+  );
+  const [applied, setApplied] = useState<CatalogFilters>(
+    () => parseCatalogHash(window.location.hash) ?? defaultCatalogFilters(),
+  );
+  const appliedKey = catalogFiltersKey(applied);
+  const [catalogItems, setCatalogItems] = useState<Anime[]>([]);
+  const [catalogCursor, setCatalogCursor] = useState<string | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogLoadingMore, setCatalogLoadingMore] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogStale, setCatalogStale] = useState(false);
+  // Facet vocabularies fail independently: one unavailable list must never
+  // blank the other, and the retry reloads both.
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [genresError, setGenresError] = useState("");
+  const [tagsError, setTagsError] = useState("");
+  const [facetsReload, setFacetsReload] = useState(0);
   // Release schedule (one GET /schedule; the page groups and filters by local weekday)
   const [scheduleEntries, setScheduleEntries] = useState<ScheduleEntry[]>([]);
   const [scheduleDay, setScheduleDay] = useState(() => new Date().getDay());
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
 
-  // My list
-  const [listItems, setListItems] = useState<Anime[]>([]);
+  // My list: the unified library holds anime and manga bookmarks side by
+  // side; each kind pages independently and merges in the view.
+  const [listItems, setListItems] = useState<LibraryEntry[]>([]);
   const [listCursor, setListCursor] = useState<string | null>(null);
+  const [listMangaCursor, setListMangaCursor] = useState<string | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listLoadingMore, setListLoadingMore] = useState(false);
   const [listError, setListError] = useState("");
@@ -138,8 +222,15 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  // Anime ids removed from the Continue watching shelf (hidden only; the
+  // backend clears a hide when the title is watched again).
+  const [continueHidden, setContinueHidden] = useState<string[]>([]);
+  // Synchronous mirror of the draft filters: a summary chip removes a filter
+  // and applies it in one click, before the new draft state is committed.
+  const draftFilters = useRef<CatalogFilters>(filters);
 
   const listController = useRef<AbortController | null>(null);
+  const mangaController = useRef<AbortController | null>(null);
   const detailController = useRef<AbortController | null>(null);
   const mainFocusReady = useRef(false);
 
@@ -156,15 +247,57 @@ export default function App() {
     }
   }
 
+  // Manual provider health refresh: one bounded homepage probe per provider.
+  // Reachability evidence only — it never switches the selected provider.
+  async function refreshProviderHealth() {
+    if (providerHealthBusy) return;
+    setProviderHealthBusy(true);
+    setProviderHealthError("");
+    try {
+      setProviders(await refreshProvidersHealth());
+    } catch (reason) {
+      setProviderHealthError(errorMessage(reason, copy.preferences.healthRefreshError));
+    } finally {
+      setProviderHealthBusy(false);
+    }
+  }
+
+
   useEffect(() => {
     void boot();
     return () => {
       detailController.current?.abort();
+      mangaController.current?.abort();
       listController.current?.abort();
     };
   }, []);
 
-  // Load local preferences and catalogue filters once startup completes.
+  // Title deep links from the desktop shell (URL scheme open and
+  // single-instance forwarding both arrive as the same event).
+  useEffect(() => onTitleLink((link) => setPendingTitleLink(link)), []);
+
+  // Dispatch the held deep link once startup is complete: the link ID is
+  // allowlisted Go-side, an unavailable title lands in the existing detail
+  // error recovery, and any other kind is ignored.
+  useEffect(() => {
+    if (bootState !== "ready" || !pendingTitleLink) return;
+    setPendingTitleLink(null);
+    if (pendingTitleLink.kind === "manga") {
+      void openManga({
+        id: pendingTitleLink.titleId,
+        title: pendingTitleLink.titleId,
+        availability: [],
+      });
+    } else if (pendingTitleLink.kind === "anime") {
+      void openAnime({
+        id: pendingTitleLink.titleId,
+        title: pendingTitleLink.titleId,
+        availability: [],
+      });
+    }
+  }, [bootState, pendingTitleLink]);
+
+  // Load local preferences once startup completes.
   useEffect(() => {
     if (bootState !== "ready") return;
     const controller = new AbortController();
@@ -184,15 +317,35 @@ export default function App() {
       .finally(() => {
         if (!signal.aborted) setSettingsLoading(false);
       });
+    return () => controller.abort();
+  }, [bootState]);
+
+  // Facet vocabularies load once and again only when the user retries them, so
+  // a retry never re-reads the preferences it cannot affect.
+  useEffect(() => {
+    if (bootState !== "ready") return;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    setGenresError("");
+    setTagsError("");
     void api<Page<Genre>>("/genres", { signal })
       .then((value) => {
         if (!signal.aborted) setGenres(value.items ?? []);
       })
-      .catch(() => {
-        /* Genre filters fall back to "All genres" when the list is unavailable. */
+      .catch((reason: unknown) => {
+        if (signal.aborted || isAbortError(reason)) return;
+        setGenresError(copy.browse.genresUnavailable);
+      });
+    void api<Page<Tag>>("/tags", { signal })
+      .then((value) => {
+        if (!signal.aborted) setTags(value.items ?? []);
+      })
+      .catch((reason: unknown) => {
+        if (signal.aborted || isAbortError(reason)) return;
+        setTagsError(copy.browse.tagsUnavailable);
       });
     return () => controller.abort();
-  }, [bootState]);
+  }, [bootState, facetsReload]);
 
   // One abortable loader per view. Cursor pagination appends in the load-more handlers.
   useEffect(() => {
@@ -203,7 +356,8 @@ export default function App() {
     const signal = controller.signal;
     if (view === "home") void loadHome(signal);
     else if (view === "search") void loadSearch(signal);
-    else if (view === "season") void loadSeason(signal);
+    else if (view === "manga") void loadManga(signal);
+    else if (view === "browse") void loadBrowse(signal);
     else if (view === "schedule") void loadSchedule(signal);
     else if (view === "list") void loadList(signal);
     else if (view === "history") void loadHistory(signal);
@@ -212,7 +366,18 @@ export default function App() {
       if (listController.current && listController.current !== controller) listController.current.abort();
       listController.current = null;
     };
-  }, [bootState, view, searchQuery, genre, season, year, reload]);
+  }, [bootState, view, searchQuery, mangaQuery, mangaProvider, appliedKey, reload]);
+
+  // The address bar mirrors the applied filters so a reload restores the same
+  // catalogue view; other destinations keep a clean URL.
+  useEffect(() => {
+    const hash = view === "browse" ? serializeCatalogHash(applied) : "";
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + window.location.search + hash,
+    );
+  }, [view, appliedKey]);
 
   // Move focus into the shell when the title overlay opens or closes. The player
   // owns focus while it replaces the shell. The first ready render keeps native
@@ -244,39 +409,58 @@ export default function App() {
         ? copy.nav.home
         : view === "search"
           ? copy.search.title
-          : view === "season"
-            ? copy.catalog.seasonTitle
+          : view === "browse"
+            ? copy.browse.title
             : view === "schedule"
               ? copy.schedule.title
               : view === "list"
                 ? copy.list.title
                 : view === "history"
                   ? copy.history.title
-                  : copy.preferences.title;
-    document.title = (anime?.title ?? pageTitle) + " · " + copy.brandName;
-  }, [bootState, view, anime?.title]);
+                  : view === "manga"
+                    ? copy.manga.title
+                    : view === "settings"
+                      ? copy.preferences.title
+                      : copy.brandName;
+    document.title = (anime?.title ?? mangaDetail?.title ?? pageTitle) + " · " + copy.brandName;
+  }, [bootState, view, anime?.title, mangaDetail?.title]);
 
   async function loadHome(signal: AbortSignal) {
     setHomeLoading(true);
     setHomeError("");
+    setHomeStale(false);
     setHomeItems([]);
     setHomeHistory([]);
     setHomeCursor(null);
-    const [catalogueResult, historyResult] = await Promise.allSettled([
+    const [catalogueResult, historyResult, hiddenResult] = await Promise.allSettled([
       api<Page<Anime>>("/catalog?limit=24", { signal }),
       api<Page<HistoryItem>>("/history?limit=12", { signal }),
+      api<{ animeIds: string[] }>("/continue-hidden", { signal }),
     ]);
     if (signal.aborted) return;
     if (catalogueResult.status === "fulfilled") {
       setHomeItems(catalogueResult.value.items ?? []);
       setHomeCursor(catalogueResult.value.nextCursor ?? null);
+      setHomeStale(catalogueResult.value.stale === true);
     } else if (!isAbortError(catalogueResult.reason)) {
       setHomeError(errorMessage(catalogueResult.reason, copy.states.requestFailed));
     }
-    if (historyResult.status === "fulfilled") {
-      setHomeHistory(historyResult.value.items ?? []);
+    if (hiddenResult.status === "fulfilled") {
+      setContinueHidden(hiddenResult.value.animeIds ?? []);
     }
     setHomeLoading(false);
+  }
+
+  async function removeFromContinue(item: HistoryItem) {
+    try {
+      await api(`/continue-hidden/${encodeURIComponent(item.anime.id)}`, { method: "PUT" });
+      setContinueHidden((current) =>
+        current.includes(item.anime.id) ? current : [...current, item.anime.id],
+      );
+      setNotice({ message: copy.home.removedFromContinue, tone: "status" });
+    } catch (reason) {
+      setNotice({ message: errorMessage(reason, copy.states.requestFailed), tone: "error" });
+    }
   }
 
   async function loadHomeMore() {
@@ -304,89 +488,364 @@ export default function App() {
     const query = searchQuery.trim();
     setSearchResults([]);
     setSearchCursor(null);
+    setSearchMangaResults([]);
+    setSearchMangaCursor(null);
     setSearchError("");
+    setSearchStale(false);
     if (!query) {
       setSearchLoading(false);
       return;
     }
     setSearchLoading(true);
-    try {
-      const params = new URLSearchParams({ limit: "24", query });
-      const result = await api<Page<Anime>>(`/catalog?${params}`, { signal });
-      if (signal.aborted) return;
-      setSearchResults(result.items ?? []);
-      setSearchCursor(result.nextCursor ?? null);
-    } catch (reason) {
-      if (!signal.aborted && !isAbortError(reason)) {
-        setSearchError(errorMessage(reason, copy.states.requestFailed));
-      }
-    } finally {
-      if (!signal.aborted) setSearchLoading(false);
+    // Both sources load in parallel; one failing never hides the other's
+    // results (partial failure keeps the successful kind visible).
+    const params = new URLSearchParams({ limit: "24", query });
+    const mangaParams = new URLSearchParams(params);
+    if (mangaProvider !== "all") mangaParams.set("provider", mangaProvider);
+    const [animeResult, mangaResult] = await Promise.allSettled([
+      api<Page<Anime>>(`/catalog?${params}`, { signal }),
+      api<Page<Manga>>(`/manga?${mangaParams}`, { signal }),
+    ]);
+    if (signal.aborted) return;
+    let animeFailed = false;
+    let mangaFailed = false;
+    let stale = false;
+    let animeReason: unknown = null;
+    if (animeResult.status === "fulfilled") {
+      setSearchResults(animeResult.value.items ?? []);
+      setSearchCursor(animeResult.value.nextCursor ?? null);
+      stale = animeResult.value.stale === true;
+    } else if (!isAbortError(animeResult.reason)) {
+      animeFailed = true;
+      animeReason = animeResult.reason;
     }
+    if (mangaResult.status === "fulfilled") {
+      setSearchMangaResults(mangaResult.value.items ?? []);
+      setSearchMangaCursor(mangaResult.value.nextCursor ?? null);
+    } else if (!isAbortError(mangaResult.reason)) {
+      mangaFailed = true;
+    }
+    setSearchStale(stale);
+    if (animeFailed && mangaFailed) setSearchError(errorMessage(animeReason, copy.states.requestFailed));
+    else if (animeFailed || mangaFailed) setSearchError(copy.search.partialError);
+    setSearchLoading(false);
   }
 
   async function loadSearchMore() {
-    if (!searchCursor || searchLoadingMore || !searchQuery.trim()) return;
+    const query = searchQuery.trim();
+    if ((!searchCursor && !searchMangaCursor) || searchLoadingMore || !query) return;
     listController.current?.abort();
     const controller = new AbortController();
     listController.current = controller;
     setSearchLoadingMore(true);
     try {
-      const params = new URLSearchParams({ limit: "24", query: searchQuery.trim(), cursor: searchCursor });
-      const result = await api<Page<Anime>>(`/catalog?${params}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      setSearchResults((current) => [...current, ...(result.items ?? [])]);
-      setSearchCursor(result.nextCursor ?? null);
-    } catch (reason) {
-      if (!controller.signal.aborted && !isAbortError(reason)) {
-        setNotice({ message: errorMessage(reason, copy.states.requestFailed), tone: "error" });
+      const requests: Promise<void>[] = [];
+      if (searchCursor) {
+        const params = new URLSearchParams({ limit: "24", query, cursor: searchCursor });
+        requests.push(
+          api<Page<Anime>>(`/catalog?${params}`, { signal: controller.signal }).then((result) => {
+            setSearchResults((current) => [...current, ...(result.items ?? [])]);
+            setSearchCursor(result.nextCursor ?? null);
+          }),
+        );
       }
+      if (searchMangaCursor) {
+        const params = new URLSearchParams({ limit: "24", query, cursor: searchMangaCursor });
+        if (mangaProvider !== "all") params.set("provider", mangaProvider);
+        requests.push(
+          api<Page<Manga>>(`/manga?${params}`, { signal: controller.signal }).then((result) => {
+            setSearchMangaResults((current) => [...current, ...(result.items ?? [])]);
+            setSearchMangaCursor(result.nextCursor ?? null);
+          }),
+        );
+      }
+      await Promise.allSettled(requests);
     } finally {
       if (!controller.signal.aborted) setSearchLoadingMore(false);
     }
   }
 
-  async function loadSeason(signal: AbortSignal) {
-    setSeasonLoading(true);
-    setSeasonError("");
-    setSeasonItems([]);
-    setSeasonCursor(null);
+
+  async function loadManga(signal: AbortSignal) {
+    const query = mangaQuery.trim();
+    setMangaLoading(true);
+    setMangaError("");
+    setMangaResults([]);
+    setMangaCursor(null);
     try {
-      const params = new URLSearchParams({ limit: "24", season, year: String(year) });
-      if (genre) params.set("genre", genre);
-      const result = await api<Page<Anime>>(`/catalog?${params}`, { signal });
+      const params = new URLSearchParams({ limit: "24" });
+      if (query) params.set("query", query);
+      if (mangaProvider !== "all") params.set("provider", mangaProvider);
+      const result = await api<Page<Manga>>(`/manga?${params}`, { signal });
       if (signal.aborted) return;
-      setSeasonItems(result.items ?? []);
-      setSeasonCursor(result.nextCursor ?? null);
+      setMangaResults(result.items ?? []);
+      setMangaCursor(result.nextCursor ?? null);
     } catch (reason) {
       if (!signal.aborted && !isAbortError(reason)) {
-        setSeasonError(errorMessage(reason, copy.states.requestFailed));
+        setMangaError(errorMessage(reason, copy.states.requestFailed));
       }
     } finally {
-      if (!signal.aborted) setSeasonLoading(false);
+      if (!signal.aborted) setMangaLoading(false);
     }
   }
 
-  async function loadSeasonMore() {
-    if (!seasonCursor || seasonLoadingMore) return;
+  async function loadMangaMore() {
+    if (!mangaCursor || mangaLoadingMore) return;
     listController.current?.abort();
     const controller = new AbortController();
     listController.current = controller;
-    setSeasonLoadingMore(true);
+    setMangaLoadingMore(true);
     try {
-      const params = new URLSearchParams({ limit: "24", season, year: String(year), cursor: seasonCursor });
-      if (genre) params.set("genre", genre);
-      const result = await api<Page<Anime>>(`/catalog?${params}`, { signal: controller.signal });
+      const params = new URLSearchParams({ limit: "24", cursor: mangaCursor });
+      const query = mangaQuery.trim();
+      if (query) params.set("query", query);
+      if (mangaProvider !== "all") params.set("provider", mangaProvider);
+      const result = await api<Page<Manga>>(`/manga?${params}`, { signal: controller.signal });
       if (controller.signal.aborted) return;
-      setSeasonItems((current) => [...current, ...(result.items ?? [])]);
-      setSeasonCursor(result.nextCursor ?? null);
+      setMangaResults((current) => [...current, ...(result.items ?? [])]);
+      setMangaCursor(result.nextCursor ?? null);
     } catch (reason) {
       if (!controller.signal.aborted && !isAbortError(reason)) {
         setNotice({ message: errorMessage(reason, copy.states.requestFailed), tone: "error" });
       }
     } finally {
-      if (!controller.signal.aborted) setSeasonLoadingMore(false);
+      if (!controller.signal.aborted) setMangaLoadingMore(false);
     }
+  }
+
+  async function openManga(selected: Manga) {
+    mangaController.current?.abort();
+    const controller = new AbortController();
+    mangaController.current = controller;
+    const signal = controller.signal;
+    setMangaDetail(selected);
+    setMangaChapters([]);
+    setMangaDetailState("loading");
+    setMangaDetailError("");
+    setMangaChapter(null);
+    setMangaResume(null);
+    setMangaBookmarked(false);
+    setNotice(null);
+    window.scrollTo({ top: 0 });
+    void mangaIsBookmarked(selected.id, signal)
+      .then((saved) => {
+        if (!signal.aborted) setMangaBookmarked(saved);
+      })
+      .catch((reason: unknown) => {
+        // Bookmark state is a local enhancement; failure leaves the toggle off.
+        if (!signal.aborted && !isAbortError(reason)) setMangaBookmarked(false);
+      });
+    // Resume reading: saved progress names the chapter to continue from.
+    void api<ReadingProgress | null>(`/manga/${id(selected.id)}/reading-progress`, { signal })
+      .then((progress) => {
+        if (!signal.aborted && progress) setMangaResume(progress.chapterId);
+      })
+      .catch((reason: unknown) => {
+        // No progress yet starts at the first chapter, like a fresh title.
+        if (!signal.aborted && !isAbortError(reason)) setMangaResume(null);
+      });
+    try {
+      const [detail, chapters] = await Promise.all([
+        api<Manga>(`/manga/${id(selected.id)}`, { signal }),
+        fetchMangaChapters(selected.id, { signal }),
+      ]);
+      if (signal.aborted) return;
+      setMangaDetail(detail);
+      setMangaChapters(chapters);
+      setMangaDetailState("ready");
+    } catch (reason) {
+      if (!signal.aborted && !isAbortError(reason)) {
+        setMangaDetailState("error");
+        setMangaDetailError(errorMessage(reason, copy.states.requestFailed));
+      }
+    }
+  }
+
+  /** Bookmarked state for the open manga, paged from the manga bookmark list. */
+  async function mangaIsBookmarked(mangaId: string, signal: AbortSignal): Promise<boolean> {
+    let cursor: string | null = null;
+    do {
+      const page: Page<Manga> = await api<Page<Manga>>(
+        `/manga/bookmarks?limit=50${cursor ? `&cursor=${id(cursor)}` : ""}`,
+        { signal },
+      );
+      if (page.items.some((item) => item.id === mangaId)) return true;
+      cursor = page.nextCursor;
+    } while (cursor && !signal.aborted);
+    return false;
+  }
+
+  async function toggleMangaBookmark() {
+    if (!mangaDetail || mangaBookmarkBusy) return;
+    const target = mangaDetail;
+    const wasBookmarked = mangaBookmarked;
+    setMangaBookmarkBusy(true);
+    try {
+      await api(`/manga/${id(target.id)}/bookmark`, { method: wasBookmarked ? "DELETE" : "PUT" });
+      setMangaBookmarked(!wasBookmarked);
+      setNotice({
+        message: wasBookmarked ? copy.details.removed : copy.details.added,
+        tone: "status",
+      });
+      setReload((value) => value + 1);
+    } catch (reason) {
+      setNotice({ message: errorMessage(reason, copy.details.bookmarkError), tone: "error" });
+    } finally {
+      setMangaBookmarkBusy(false);
+    }
+  }
+
+  function closeManga() {
+    mangaController.current?.abort();
+    setMangaDetail(null);
+    setMangaChapters([]);
+    setMangaDetailState("idle");
+    setMangaDetailError("");
+    setMangaChapter(null);
+    setMangaBookmarked(false);
+    setNotice(null);
+    window.scrollTo({ top: 0 });
+  }
+
+  function openMangaChapter(chapter: MangaChapter) {
+    setMangaChapter(chapter);
+  }
+
+  function closeReader() {
+    setMangaChapter(null);
+  }
+
+  function handleMangaInput(value: string) {
+    setMangaQueryInput(value);
+    if (!mangaLoading) return;
+    listController.current?.abort();
+    const controller = new AbortController();
+    listController.current = controller;
+    void loadManga(controller.signal);
+  }
+
+  function submitMangaSearch() {
+    listController.current?.abort();
+    listController.current = null;
+    if (mangaLoading) setMangaLoading(false);
+    setMangaQuery(mangaQueryInput.trim());
+    setReload((value) => value + 1);
+  }
+
+  function clearMangaSearch() {
+    listController.current?.abort();
+    listController.current = null;
+    setMangaLoading(false);
+    setMangaQueryInput("");
+    setMangaQuery("");
+    setReload((value) => value + 1);
+  }
+
+  /**
+   * One catalogue request in API terms. Facets travel as repeated params so the
+   * backend ANDs them; defaults are omitted to keep the URL and cache key tight.
+   */
+  function catalogParams(next: CatalogFilters, cursor?: string | null): URLSearchParams {
+    const params = new URLSearchParams({ limit: "24" });
+    const query = next.query.trim();
+    if (query) params.set("query", query);
+    if (next.status !== "all") params.set("status", next.status);
+    if (next.type !== "all") params.set("type", next.type);
+    if (next.sort !== "popular") params.set("sort", next.sort);
+    const season = next.season.trim();
+    if (season) params.set("season", season);
+    if (next.year > 0) params.set("year", String(next.year));
+    for (const genre of next.genres) params.append("genre", genre);
+    for (const tag of next.tags) params.append("tag", tag);
+    if (cursor) params.set("cursor", cursor);
+    return params;
+  }
+
+  async function loadBrowse(signal: AbortSignal) {
+    setCatalogLoading(true);
+    setCatalogError("");
+    setCatalogStale(false);
+    setCatalogItems([]);
+    setCatalogCursor(null);
+    try {
+      const result = await api<Page<Anime>>(`/catalog?${catalogParams(applied)}`, { signal });
+      if (signal.aborted) return;
+      setCatalogItems(result.items ?? []);
+      setCatalogCursor(result.nextCursor ?? null);
+      setCatalogStale(result.stale === true);
+    } catch (reason) {
+      if (!signal.aborted && !isAbortError(reason)) {
+        setCatalogError(errorMessage(reason, copy.states.requestFailed));
+      }
+    } finally {
+      if (!signal.aborted) setCatalogLoading(false);
+    }
+  }
+
+  async function loadBrowseMore() {
+    if (!catalogCursor || catalogLoadingMore) return;
+    listController.current?.abort();
+    const controller = new AbortController();
+    listController.current = controller;
+    setCatalogLoadingMore(true);
+    try {
+      const result = await api<Page<Anime>>(`/catalog?${catalogParams(applied, catalogCursor)}`, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      setCatalogItems((current) => [...current, ...(result.items ?? [])]);
+      setCatalogCursor(result.nextCursor ?? null);
+    } catch (reason) {
+      if (!controller.signal.aborted && !isAbortError(reason)) {
+        setNotice({ message: errorMessage(reason, copy.states.requestFailed), tone: "error" });
+      }
+    } finally {
+      if (!controller.signal.aborted) setCatalogLoadingMore(false);
+    }
+  }
+
+  function updateFilters(patch: Partial<CatalogFilters>) {
+    const next = { ...draftFilters.current, ...patch };
+    draftFilters.current = next;
+    setFilters(next);
+  }
+
+  function applyFilters() {
+    setApplied(draftFilters.current);
+  }
+
+  function applyPresetFilters(preset: CatalogFilters) {
+    draftFilters.current = preset;
+    setFilters(preset);
+    setApplied(preset);
+    navigate("browse");
+  }
+
+  function openSeasonPreset() {
+    applyPresetFilters({
+      ...defaultCatalogFilters(),
+      season: currentSeason(),
+      year: new Date().getFullYear(),
+    });
+  }
+
+  function openGenreFilter(genre: string) {
+    applyPresetFilters({ ...defaultCatalogFilters(), genres: [genre] });
+  }
+
+  function openTagFilter(tag: string) {
+    applyPresetFilters({ ...defaultCatalogFilters(), tags: [tag] });
+  }
+
+  function clearFilters() {
+    const cleared = defaultCatalogFilters();
+    draftFilters.current = cleared;
+    setFilters(cleared);
+    setApplied(cleared);
+  }
+
+  function retryFacets() {
+    setFacetsReload((value) => value + 1);
   }
 
   async function loadSchedule(signal: AbortSignal) {
@@ -411,36 +870,70 @@ export default function App() {
     setListError("");
     setListItems([]);
     setListCursor(null);
-    try {
-      const result = await api<Page<Anime>>("/bookmarks?limit=24", { signal });
-      if (signal.aborted) return;
-      setListItems(result.items ?? []);
-      setListCursor(result.nextCursor ?? null);
-    } catch (reason) {
-      if (!signal.aborted && !isAbortError(reason)) {
-        setListError(errorMessage(reason, copy.states.requestFailed));
-      }
-    } finally {
-      if (!signal.aborted) setListLoading(false);
+    setListMangaCursor(null);
+    // Both bookmark kinds load in parallel; a partial failure keeps the other
+    // kind's saved titles visible with an error notice.
+    const [animeResult, mangaResult] = await Promise.allSettled([
+      api<Page<Anime>>("/bookmarks?limit=24", { signal }),
+      api<Page<Manga>>("/manga/bookmarks?limit=24", { signal }),
+    ]);
+    if (signal.aborted) return;
+    const entries: LibraryEntry[] = [];
+    let animeFailed = false;
+    let mangaFailed = false;
+    let animeReason: unknown = null;
+    if (animeResult.status === "fulfilled") {
+      setListCursor(animeResult.value.nextCursor ?? null);
+      for (const item of animeResult.value.items ?? []) entries.push({ kind: "anime", item, createdAt: "" });
+    } else if (!isAbortError(animeResult.reason)) {
+      animeFailed = true;
+      animeReason = animeResult.reason;
     }
+    if (mangaResult.status === "fulfilled") {
+      setListMangaCursor(mangaResult.value.nextCursor ?? null);
+      for (const item of mangaResult.value.items ?? []) entries.push({ kind: "manga", item, createdAt: "" });
+    } else if (!isAbortError(mangaResult.reason)) {
+      mangaFailed = true;
+    }
+    setListItems(entries);
+    if (animeFailed && mangaFailed) setListError(errorMessage(animeReason, copy.states.requestFailed));
+    else if (animeFailed || mangaFailed) setListError(copy.search.partialError);
+    setListLoading(false);
   }
 
   async function loadListMore() {
-    if (!listCursor || listLoadingMore) return;
+    if ((!listCursor && !listMangaCursor) || listLoadingMore) return;
     listController.current?.abort();
     const controller = new AbortController();
     listController.current = controller;
     setListLoadingMore(true);
     try {
-      const params = new URLSearchParams({ limit: "24", cursor: listCursor });
-      const result = await api<Page<Anime>>(`/bookmarks?${params}`, { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      setListItems((current) => [...current, ...(result.items ?? [])]);
-      setListCursor(result.nextCursor ?? null);
-    } catch (reason) {
-      if (!controller.signal.aborted && !isAbortError(reason)) {
-        setNotice({ message: errorMessage(reason, copy.states.requestFailed), tone: "error" });
+      const requests: Promise<void>[] = [];
+      if (listCursor) {
+        const params = new URLSearchParams({ limit: "24", cursor: listCursor });
+        requests.push(
+          api<Page<Anime>>(`/bookmarks?${params}`, { signal: controller.signal }).then((result) => {
+            setListItems((current) => [
+              ...current,
+              ...(result.items ?? []).map((item) => ({ kind: "anime", item, createdAt: "" }) as LibraryEntry),
+            ]);
+            setListCursor(result.nextCursor ?? null);
+          }),
+        );
       }
+      if (listMangaCursor) {
+        const params = new URLSearchParams({ limit: "24", cursor: listMangaCursor });
+        requests.push(
+          api<Page<Manga>>(`/manga/bookmarks?${params}`, { signal: controller.signal }).then((result) => {
+            setListItems((current) => [
+              ...current,
+              ...(result.items ?? []).map((item) => ({ kind: "manga", item, createdAt: "" }) as LibraryEntry),
+            ]);
+            setListMangaCursor(result.nextCursor ?? null);
+          }),
+        );
+      }
+      await Promise.allSettled(requests);
     } finally {
       if (!controller.signal.aborted) setListLoadingMore(false);
     }
@@ -499,6 +992,7 @@ export default function App() {
     setDetailError("");
     setNotice(null);
     setBookmarked(false);
+    setWatched({});
     setProvider(settings.preferredProvider);
     window.scrollTo({ top: 0 });
     try {
@@ -528,6 +1022,21 @@ export default function App() {
         const page: Page<Episode> = await api<Page<Episode>>(`/anime/${id(selected.id)}/episodes`, { signal });
         return page.items ?? [];
       })();
+      void api<{ episodes: { episodeId: string; watched: boolean }[] }>(
+        `/watched?animeId=${id(selected.id)}`,
+        { signal },
+      )
+        .then((value) => {
+          if (signal.aborted) return;
+          const flags: Record<string, boolean> = {};
+          for (const item of value.episodes ?? []) flags[item.episodeId] = item.watched;
+          setWatched(flags);
+        })
+        .catch((reason: unknown) => {
+          // Watched flags are a local enhancement; a failure never blocks the
+          // detail view, it only leaves the toggles off until a retry.
+          if (!signal.aborted && !isAbortError(reason)) setWatched({});
+        });
       const [allEpisodes] = await Promise.all([episodeRequest, detailRequest]);
       if (signal.aborted) return;
       const ordered = [...allEpisodes].sort((a, b) => a.ordinal - b.ordinal);
@@ -567,10 +1076,50 @@ export default function App() {
     setEpisode(null);
     setEpisodes([]);
     setAutoplayEpisode(null);
+    setWatched({});
     setDetailState("idle");
     setDetailError("");
     setNotice(null);
     window.scrollTo({ top: 0 });
+  }
+
+  async function toggleWatched(episodeId: string, next: boolean) {
+    if (watchedBusy) return;
+    setWatchedBusy(true);
+    try {
+      await api(`/watched/${id(episodeId)}`, { method: next ? "PUT" : "DELETE" });
+      setWatched((current) => ({ ...current, [episodeId]: next }));
+      setNotice({
+        message: next ? copy.details.markedWatched : copy.details.markedUnwatched,
+        tone: "status",
+      });
+    } catch (reason) {
+      setNotice({ message: errorMessage(reason, copy.details.watchedError), tone: "error" });
+    } finally {
+      setWatchedBusy(false);
+    }
+  }
+
+  async function bulkWatched(next: boolean) {
+    if (!anime || watchedBusy) return;
+    const target = anime;
+    setWatchedBusy(true);
+    try {
+      await api("/watched/bulk", { method: "POST", body: json({ animeId: target.id, watched: next }) });
+      setWatched((current) => {
+        const flags: Record<string, boolean> = { ...current };
+        for (const item of episodes) flags[item.id] = next;
+        return flags;
+      });
+      setNotice({
+        message: next ? copy.details.markedWatched : copy.details.markedUnwatched,
+        tone: "status",
+      });
+    } catch (reason) {
+      setNotice({ message: errorMessage(reason, copy.details.watchedError), tone: "error" });
+    } finally {
+      setWatchedBusy(false);
+    }
   }
 
   async function toggleBookmark() {
@@ -593,12 +1142,14 @@ export default function App() {
     }
   }
 
-  async function removeBookmark(target: Anime) {
+  async function removeBookmark(target: LibraryEntry) {
     if (removingId) return;
-    setRemovingId(target.id);
+    const targetId = target.item.id;
+    setRemovingId(targetId);
     try {
-      await api(`/bookmarks/${id(target.id)}`, { method: "DELETE" });
-      setListItems((current) => current.filter((item) => item.id !== target.id));
+      const path = target.kind === "manga" ? `/manga/${id(targetId)}/bookmark` : `/bookmarks/${id(targetId)}`;
+      await api(path, { method: "DELETE" });
+      setListItems((current) => current.filter((entry) => entry.item.id !== targetId));
       setNotice({ message: copy.list.removed, tone: "status" });
     } catch (reason) {
       setNotice({ message: errorMessage(reason, copy.details.bookmarkError), tone: "error" });
@@ -683,6 +1234,12 @@ export default function App() {
     setAutoplayEpisode(null);
     setDetailState("idle");
     setDetailError("");
+    mangaController.current?.abort();
+    setMangaDetail(null);
+    setMangaChapters([]);
+    setMangaDetailState("idle");
+    setMangaDetailError("");
+    setMangaChapter(null);
     setConfirmKind(null);
     setNotice(null);
     setSaveError("");
@@ -716,6 +1273,8 @@ export default function App() {
     setSearchLoading(false);
     setQueryInput("");
     setSearchQuery("");
+    setSearchMangaResults([]);
+    setSearchMangaCursor(null);
     setReload((value) => value + 1);
   }
 
@@ -787,6 +1346,19 @@ export default function App() {
     );
   }
 
+  if (mangaDetail && mangaChapter) {
+    return (
+      <Reader
+        manga={mangaDetail}
+        chapter={mangaChapter}
+        chapters={mangaChapters}
+        onChapter={openMangaChapter}
+        onClose={closeReader}
+      />
+    );
+  }
+
+
   const feature = homeItems.find((item) => item.posterUrl) ?? homeItems[0] ?? null;
 
   function renderView() {
@@ -795,13 +1367,15 @@ export default function App() {
         <Home
           feature={feature}
           catalogue={homeItems}
-          history={homeHistory}
+          history={homeHistory.filter((item) => !continueHidden.includes(item.anime.id))}
+          onRemoveFromContinue={(item) => void removeFromContinue(item)}
           loading={homeLoading}
           loadingMore={homeLoadingMore}
           error={homeError}
+          stale={homeStale}
           hasMore={homeCursor !== null}
           onOpen={(item, episodeId) => void openAnime(item, episodeId)}
-          onViewSeason={() => navigate("season")}
+          onViewSeason={openSeasonPreset}
           onViewHistory={() => navigate("history")}
           onLoadMore={() => void loadHomeMore()}
           onRetry={retryView}
@@ -817,35 +1391,69 @@ export default function App() {
           onSubmit={submitSearch}
           onClear={clearSearch}
           results={searchResults}
+          mangaResults={searchMangaResults}
+          kind={searchKind}
+          onKind={setSearchKind}
+          mangaProvider={mangaProvider}
+          onMangaProvider={(value) => setMangaProvider(value)}
+          mangaProviderOptions={mangaProviderOptions}
           loading={searchLoading}
           loadingMore={searchLoadingMore}
           error={searchError}
+          stale={searchStale}
           searched={searchQuery.trim().length > 0}
-          hasMore={searchCursor !== null}
-          onOpen={(item) => void openAnime(item)}
+          hasMore={searchCursor !== null || searchMangaCursor !== null}
+          onOpen={(item, kind) => void (kind === "manga" ? openManga(item as Manga) : openAnime(item as Anime))}
           onLoadMore={() => void loadSearchMore()}
           onRetry={retryView}
         />
       );
     }
-    if (view === "season") {
+    if (view === "manga") {
       return (
-        <Season
-          season={season}
-          year={year}
-          genre={genre}
+        <MangaPage
+          input={mangaQueryInput}
+          query={mangaQuery}
+          onInput={handleMangaInput}
+          onSubmit={submitMangaSearch}
+          onClear={clearMangaSearch}
+          results={mangaResults}
+          loading={mangaLoading}
+          loadingMore={mangaLoadingMore}
+          error={mangaError}
+          hasMore={mangaCursor !== null}
+          onOpen={(item) => void openManga(item)}
+          onLoadMore={() => void loadMangaMore()}
+          provider={mangaProvider}
+          onProvider={(value) => setMangaProvider(value)}
+          providerOptions={mangaProviderOptions}
+          onRetry={retryView}
+        />
+      );
+    }
+
+    if (view === "browse") {
+      return (
+        <Browse
+          filters={filters}
+          applied={applied}
+          onFilters={updateFilters}
+          onApply={applyFilters}
+          onClear={clearFilters}
           seasons={seasons}
           genres={genres}
-          onSeason={setSeason}
-          onYear={setYear}
-          onGenre={setGenre}
-          items={seasonItems}
-          loading={seasonLoading}
-          loadingMore={seasonLoadingMore}
-          error={seasonError}
-          hasMore={seasonCursor !== null}
+          genresError={genresError}
+          tags={tags}
+          tagsError={tagsError}
+          onRetryFacets={retryFacets}
+          items={catalogItems}
+          loading={catalogLoading}
+          loadingMore={catalogLoadingMore}
+          error={catalogError}
+          stale={catalogStale}
+          hasMore={catalogCursor !== null}
           onOpen={(item) => void openAnime(item)}
-          onLoadMore={() => void loadSeasonMore()}
+          onLoadMore={() => void loadBrowseMore()}
           onRetry={retryView}
         />
       );
@@ -860,7 +1468,7 @@ export default function App() {
           localTimeZone={localTimeZoneLabel()}
           onDay={setScheduleDay}
           onOpen={(item) => void openAnime(item)}
-          onBrowseSeason={() => navigate("season")}
+          onBrowseSeason={openSeasonPreset}
           onRetry={retryView}
         />
       );
@@ -872,17 +1480,17 @@ export default function App() {
           loading={listLoading}
           loadingMore={listLoadingMore}
           error={listError}
-          hasMore={listCursor !== null}
+          hasMore={listCursor !== null || listMangaCursor !== null}
           filter={listFilter}
           sort={listSort}
           removingId={removingId}
           onFilter={setListFilter}
           onSort={setListSort}
-          onOpen={(item) => void openAnime(item)}
+          onOpen={(entry) => void (entry.kind === "manga" ? openManga(entry.item) : openAnime(entry.item))}
           onLoadMore={() => void loadListMore()}
           onRetry={retryView}
-          onRemove={(item) => void removeBookmark(item)}
-          onExplore={() => navigate("season")}
+          onRemove={(entry) => void removeBookmark(entry)}
+          onExplore={() => navigate("browse")}
         />
       );
     }
@@ -899,7 +1507,7 @@ export default function App() {
           onClear={() => setConfirmKind("history")}
           onLoadMore={() => void loadHistoryMore()}
           onRetry={retryView}
-          onExplore={() => navigate("season")}
+          onExplore={() => navigate("browse")}
         />
       );
     }
@@ -907,6 +1515,9 @@ export default function App() {
       <Preferences
         settings={settings}
         providers={providers}
+        healthBusy={providerHealthBusy}
+        healthError={providerHealthError}
+        onRefreshProviderHealth={() => void refreshProviderHealth()}
         theme={theme}
         sessionSpeed={sessionSpeed}
         busy={settingsBusy}
@@ -920,6 +1531,7 @@ export default function App() {
         onClearHistory={() => setConfirmKind("history")}
         onClearList={() => setConfirmKind("list")}
         onClearCache={() => setConfirmKind("cache")}
+        playing={episode !== null}
       />
     );
   }
@@ -947,7 +1559,7 @@ export default function App() {
 
   return (
     <AppShell
-      view={anime ? null : view}
+      view={anime || mangaDetail ? null : view}
       onNavigate={navigate}
       onSearch={openSearch}
     >
@@ -961,7 +1573,21 @@ export default function App() {
           />
         </div>
       ) : null}
-      {anime ? (
+      {mangaDetail ? (
+        <MangaDetail
+          manga={mangaDetail}
+          chapters={mangaChapters}
+          state={mangaDetailState}
+          error={mangaDetailError}
+          bookmarked={mangaBookmarked}
+          bookmarkBusy={mangaBookmarkBusy}
+          resumeChapterId={mangaResume}
+          onBack={closeManga}
+          onRead={openMangaChapter}
+          onToggleBookmark={() => void toggleMangaBookmark()}
+          onRetry={() => void openManga(mangaDetail)}
+        />
+      ) : anime ? (
         <Details
           anime={anime}
           episodes={episodes}
@@ -969,9 +1595,15 @@ export default function App() {
           error={detailError}
           bookmarked={bookmarked}
           busy={bookmarkBusy}
+          watched={watched}
+          watchedBusy={watchedBusy}
           onBack={closeDetail}
           onPlay={openPlayer}
           onToggleBookmark={() => void toggleBookmark()}
+          onToggleWatched={(episodeId, next) => void toggleWatched(episodeId, next)}
+          onBulkWatched={(next) => void bulkWatched(next)}
+          onFilterByGenre={openGenreFilter}
+          onFilterByTag={openTagFilter}
           onRetry={() => void openAnime(anime)}
         />
       ) : (

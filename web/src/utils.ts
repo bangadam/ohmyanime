@@ -1,4 +1,4 @@
-import type { Anime } from "./api";
+import type { Anime, Provider } from "./api";
 
 export const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
@@ -68,6 +68,29 @@ export function uniqueLabels(labels: string[]): string[] {
     seen.set(label, count);
     return count === 1 ? label : label + " (" + count + ")";
   });
+}
+
+/**
+ * Only providers that actually list an episode are selectable. An empty
+ * availability list means unknown, in which case every enabled provider
+ * stays selectable.
+ */
+export function filterAvailableProviders(providers: Provider[], listed: string[] | undefined): Provider[] {
+  const enabled = providers.filter((item) => item.enabled);
+  if (!listed || listed.length === 0) return enabled;
+  return enabled.filter((item) => listed.includes(item.id));
+}
+
+/**
+ * Provider-level audio capabilities: what the source can serve in general,
+ * never a claim that any specific title offers the mode. Falls back to the
+ * legacy modes list for payloads without declared capabilities; an absent
+ * capability is never inferred beyond what the provider itself declares.
+ */
+export function providerAudioModes(provider: Provider): string[] {
+  const capabilities = provider.capabilities;
+  if (capabilities && Array.isArray(capabilities.audioModes)) return capabilities.audioModes;
+  return provider.modes;
 }
 
 export function metaLine(parts: Array<string | number | null | undefined>): string {
@@ -166,8 +189,17 @@ export function isMovie(anime: Anime): boolean {
   return type === "movie" || type === "film";
 }
 
-export function sortByTitle(items: Anime[], direction: "asc" | "desc"): Anime[] {
-  const sorted = [...items].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+export function sortByTitle<T extends { title: string }>(items: T[], direction: "asc" | "desc"): T[];
+export function sortByTitle<T>(items: T[], direction: "asc" | "desc", titleOf: (item: T) => string): T[];
+export function sortByTitle(
+  items: unknown[],
+  direction: "asc" | "desc",
+  titleOf?: (item: unknown) => string,
+): unknown[] {
+  const defaultTitle = (item: unknown): string =>
+    typeof item === "object" && item !== null && "title" in item && typeof item.title === "string" ? item.title : "";
+  const title = titleOf ?? defaultTitle;
+  const sorted = [...items].sort((a, b) => title(a).localeCompare(title(b), undefined, { sensitivity: "base" }));
   return direction === "desc" ? sorted.reverse() : sorted;
 }
 

@@ -8,6 +8,7 @@ import {
   ArrowUp,
   Bookmark,
   CalendarDays,
+  BookOpen,
   Film,
   History,
   Home,
@@ -31,7 +32,8 @@ export interface AppShellProps {
 
 const PRIMARY_NAV: { key: NavKey; label: string }[] = [
   { key: "home", label: copy.nav.home },
-  { key: "season", label: copy.nav.season },
+  { key: "manga", label: copy.nav.manga },
+  { key: "browse", label: copy.nav.browse },
   { key: "schedule", label: copy.nav.schedule },
   { key: "list", label: copy.nav.list },
 ];
@@ -39,11 +41,13 @@ const PRIMARY_NAV: { key: NavKey; label: string }[] = [
 /* Contract label for the narrow-screen destination is "Settings". */
 const MOBILE_NAV: { key: NavKey; label: string; Icon: LucideIcon }[] = [
   { key: "home", label: copy.nav.home, Icon: Home },
-  { key: "season", label: "Season", Icon: Film },
+  { key: "manga", label: "Manga", Icon: BookOpen },
+  { key: "browse", label: copy.nav.browse, Icon: Film },
   { key: "schedule", label: copy.nav.schedule, Icon: CalendarDays },
   { key: "list", label: copy.nav.list, Icon: Bookmark },
   { key: "settings", label: "Settings", Icon: Settings },
 ];
+
 
 export function AppShell({ view, onNavigate, onSearch, children }: AppShellProps) {
   const desktop = isDesktop();

@@ -123,6 +123,67 @@
   margin-block-start: var(--space-2);
 }
 
+/* Facet groups: each chip navigates to the catalogue filtered by that value. */
+.detail-taxonomy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Visible group heading; the group's aria-label carries the same text. */
+.detail-taxonomy__label {
+  flex-basis: 100%;
+  color: var(--color-muted);
+  font-size: var(--font-meta);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.taxonomy-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--target-min);
+  max-width: 100%;
+  padding-block: var(--space-2);
+  padding-inline: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+  background: var(--color-raised);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-control);
+  font-weight: var(--weight-medium);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-close) var(--ease-surface),
+    border-color var(--duration-close) var(--ease-surface),
+    color var(--duration-close) var(--ease-surface);
+}
+
+@media (hover: hover) {
+  .taxonomy-chip:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+  }
+}
+
+/* The global :focus-visible outline supplies the ring; the border keeps the
+   chip distinguishable from its neighbours while the outline sits outside. */
+.taxonomy-chip:focus-visible {
+  border-color: var(--color-accent);
+}
+
+@media (forced-colors: active) {
+  .taxonomy-chip {
+    border-color: ButtonText;
+  }
+}
+
 .detail-episodes {
   margin-block-start: var(--space-7);
   padding-block-start: var(--space-7);
@@ -218,6 +279,56 @@
 
 .detail-episode:hover:not(:disabled) .detail-episode__play {
   color: var(--color-text);
+}
+
+.detail-episode-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.detail-episode-row .detail-episode {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.detail-episode__watched {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+  background-color: transparent;
+  color: var(--color-muted);
+  transition:
+    color var(--duration-close) var(--ease-surface),
+    border-color var(--duration-close) var(--ease-surface);
+}
+
+.detail-episode__watched:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.detail-episode__watched-icon.is-on {
+  color: var(--color-accent, currentColor);
+}
+
+.detail-episodes__bulk {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+.detail-episode-search {
+  margin-block-start: var(--space-2);
+  max-width: 24rem;
+}
+
+.detail-episode-search__empty {
+  margin-block-start: var(--space-2);
+  color: var(--color-muted);
 }
 
 .detail-skeleton {
@@ -542,6 +653,24 @@
 .prefs-providers__name {
   font-weight: var(--weight-medium);
   overflow-wrap: anywhere;
+}
+
+.prefs-providers__modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.prefs-providers__health {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.prefs-providers__checked {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
 }
 
 .prefs-empty,

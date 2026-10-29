@@ -18,6 +18,8 @@ import {
   MonitorPlay,
   Pause,
   Play,
+  PictureInPicture,
+  PictureInPicture2,
   RotateCcw,
   Settings as SettingsIcon,
   SkipForward,
@@ -42,8 +44,24 @@ import {
   type Subtitle,
 } from "./api";
 import { copy, format } from "./copy";
-import { SPEED_OPTIONS, clamp, cleanDisplayLabel, cleanEpisodeTitle, formatClock, percent, uniqueLabels } from "./utils";
-import { SUBTITLE_SCALE_MAX, SUBTITLE_SCALE_MIN, useSubtitleScale } from "./subtitles";
+import {
+  SPEED_OPTIONS,
+  clamp,
+  cleanDisplayLabel,
+  cleanEpisodeTitle,
+  filterAvailableProviders,
+  formatClock,
+  percent,
+  uniqueLabels,
+} from "./utils";
+import {
+  SUBTITLE_SCALE_MAX,
+  SUBTITLE_SCALE_MIN,
+  subtitleCueStyles,
+  useSubtitleCuePreferences,
+  useSubtitleScale,
+} from "./subtitles";
+import { classifyPlaybackFailure, hlsFailureStage, type RetryStage } from "./playback-failures";
 import "./styles/player.css";
 
 export interface PlayerProps {
@@ -121,6 +139,66 @@ function audioTrackLabel(track: AudioTrackInfo): string {
   return copy.player.languageUnknown;
 }
 
+/* lib.dom types navigator.mediaSession as always present, but WKWebView does
+   not implement it. Resolve the API at runtime so an unsupported host is a
+   first-class no-op instead of a crash. */
+function osMediaSession(): MediaSession | null {
+  if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return null;
+  return navigator.mediaSession;
+}
+
+/* Picture-in-picture support varies by host: WKWebView (the desktop shell's
+   webview) exposes only the webkit presentation-mode API, while Chromium
+   implements the standard one. Resolve both at runtime so unsupported hosts
+   simply never see the control. */
+type WebKitVideo = HTMLVideoElement & {
+  webkitSupportsPresentationMode?: boolean;
+  webkitPresentationMode?: "current" | "fullscreen" | "inline" | "picture-in-picture";
+  webkitSetPresentationMode?: (mode: "picture-in-picture" | "inline") => Promise<void> | void;
+};
+
+function supportsPictureInPicture(element: HTMLVideoElement | null): boolean {
+  const doc = document as Document & { pictureInPictureEnabled?: boolean };
+  if (doc.pictureInPictureEnabled) return true;
+  const video = element as WebKitVideo | null;
+  return Boolean(video?.webkitSupportsPresentationMode && typeof video.webkitSetPresentationMode === "function");
+}
+
+function exitPictureInPicture(element: HTMLVideoElement): Promise<void> {
+  const doc = document as Document & { pictureInPictureElement?: Element | null; exitPictureInPicture?: () => Promise<void> };
+  try {
+    if (doc.pictureInPictureElement && typeof doc.exitPictureInPicture === "function") {
+      return Promise.resolve(doc.exitPictureInPicture());
+    }
+    const video = element as WebKitVideo;
+    if (video.webkitPresentationMode === "picture-in-picture" && video.webkitSetPresentationMode) {
+      return Promise.resolve(video.webkitSetPresentationMode("inline"));
+    }
+  } catch {
+    // Leaving pip is best-effort teardown; a host that refuses is left as-is.
+  }
+  return Promise.resolve();
+}
+
+/* Position state is advisory and updates continuously: guard each call so a
+   host without the API, or an element whose duration is not known yet, never
+   reports bogus values to the OS. */
+function publishMediaPosition(element: HTMLVideoElement): void {
+  const session = osMediaSession();
+  if (!session || typeof session.setPositionState !== "function") return;
+  const mediaDuration = element.duration;
+  if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) return;
+  try {
+    session.setPositionState({
+      duration: mediaDuration,
+      playbackRate: element.playbackRate > 0 ? element.playbackRate : 1,
+      position: clamp(element.currentTime, 0, mediaDuration),
+    });
+  } catch {
+    // A rejection only means the host falls back to its own clock.
+  }
+}
+
 export function Player({
   anime,
   episode,
@@ -168,11 +246,17 @@ export function Player({
   const episodesPanelRef = useRef<HTMLElement | null>(null);
   const focusOnOpenRef = useRef<string | null>(null);
   const revealOnlyRef = useRef(false);
+  const mediaControlsRef = useRef<{ toggle: () => void; seek: (seconds: number) => void }>({
+    toggle: () => {},
+    seek: () => {},
+  });
+  const mediaActiveRef = useRef(false);
 
   const [session, setSession] = useState<PlaybackSession | null>(null);
   const [status, setStatus] = useState<PlayerStatus>("loading");
   const [error, setError] = useState("");
-  const [failureKind, setFailureKind] = useState<"media" | "provider" | "exhausted">("media");
+  const [failureKind, setFailureKind] = useState<"media" | "provider" | "exhausted" | "timeout">("media");
+  const [failureStage, setFailureStage] = useState<RetryStage | null>(null);
   const [notice, setNotice] = useState("");
   const [retry, setRetry] = useState(0);
   const [time, setTime] = useState(0);
@@ -192,8 +276,12 @@ export function Player({
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [pipCapable, setPipCapable] = useState(false);
+  const [pipActive, setPipActive] = useState(false);
   const [menu, setMenu] = useState<PlayerMenu>(null);
   const [idle, setIdle] = useState(false);
+  const cuePrefs = useSubtitleCuePreferences();
+  const cueStyles = subtitleCueStyles(cuePrefs.backgroundOpacity, cuePrefs.edgeStyle);
   const [subtitleScale, setSubtitleScale] = useSubtitleScale();
   const [overlayMounted, setOverlayMounted] = useState(false);
   const [nativeFallback, setNativeFallback] = useState(false);
@@ -211,7 +299,7 @@ export function Player({
   bufferingRef.current = buffering;
   seekingRef.current = seeking;
   speedRef.current = sessionSpeed;
-
+  mediaControlsRef.current = { toggle: togglePlay, seek: seekTo };
   const index = episodes.findIndex((item) => item.id === episode.id);
   const previous = index > 0 ? episodes[index - 1] : undefined;
   const next = index >= 0 && index < episodes.length - 1 ? episodes[index + 1] : undefined;
@@ -289,12 +377,10 @@ export function Player({
   // Only offer providers that actually list this episode. The episode payload
   // carries the providers that returned it; an empty list means unknown, in
   // which case every enabled provider stays selectable.
-  const availableProviders = useMemo(() => {
-    const listed = episode.availability ?? [];
-    const enabled = providers.filter((item) => item.enabled);
-    if (listed.length === 0) return enabled;
-    return enabled.filter((item) => listed.includes(item.id));
-  }, [episode.availability, providers]);
+  const availableProviders = useMemo(
+    () => filterAvailableProviders(providers, episode.availability),
+    [episode.availability, providers],
+  );
 
   const providerChoices = useMemo<{ value: string; label: string }[]>(() => {
     const choices: { value: string; label: string }[] = [{ value: "auto", label: copy.player.auto }];
@@ -302,16 +388,11 @@ export function Player({
     return choices;
   }, [availableProviders]);
 
-  // A provider kept from an earlier episode may not carry this one. Use automatic
-  // selection for the request and the control instead of asking for a session
-  // that cannot resolve, then normalize the stored choice.
-  const effectiveProvider =
-    provider === "auto" || availableProviders.some((item) => item.id === provider) ? provider : "auto";
-
-  useEffect(() => {
-    if (effectiveProvider === provider) return;
-    onProviderChange(effectiveProvider);
-  }, [effectiveProvider, onProviderChange, provider]);
+  // A provider kept from an earlier episode may not carry this one. The
+  // explicit choice is never rewritten or substituted behind the user's back:
+  // the request always names it, and a source that cannot serve the episode
+  // surfaces the provider failure card so the viewer decides what to do next.
+  const effectiveProvider = provider;
 
   const activeInterval = useMemo<{ name: "intro" | "outro"; end: number } | null>(() => {
     const candidates = [
@@ -759,11 +840,35 @@ export function Player({
     conflictRef.current = false;
     setError("");
     setFailureKind("media");
+    setFailureStage(null);
     setStatus("loading");
     setRetry((value) => value + 1);
   }
 
-  function tryAgainFromError() {
+  /**
+   * Retry targets only the failed stage. A manifest or segment failure keeps
+   * the live session and reloads its resource (hls.js startLoad or element
+   * load) without a new resolve, so no orphan session is created; a resolve
+   * or session failure bumps `retry`, whose effect first tears down the
+   * previous session and then resolves a fresh one.
+   */
+  function retryFailedStage() {
+    if (failureStage === "manifest" || failureStage === "segment") {
+      recoveriesRef.current = 0;
+      setError("");
+      setFailureKind("media");
+      setFailureStage(null);
+      if (hlsRef.current && sessionRef.current) {
+        hlsRef.current.startLoad();
+        setStatus("ready");
+        return;
+      }
+      if (videoRef.current && sessionRef.current) {
+        setStatus("recovering");
+        videoRef.current.load();
+        return;
+      }
+    }
     retryPlayback();
   }
 
@@ -786,7 +891,7 @@ export function Player({
     setLevels([]);
     setAudio([]);
     setAudioTrack(-1);
-    setError("");
+    setFailureStage(null);
     setFailureKind("media");
     setNotice("");
     setStatus("loading");
@@ -865,7 +970,12 @@ export function Player({
           });
           engine.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal) return;
-            if (recoveriesRef.current < 1) {
+            // Silent in-place recovery is only safe while the viewer is
+            // actually watching. A paused player that idled long enough for
+            // its signed URLs to expire must not restart on its own: that
+            // throws away the paused position and looks like a random jump.
+            const watching = !element.paused && !element.ended && document.visibilityState === "visible";
+            if (watching && recoveriesRef.current < 1) {
               recoveriesRef.current += 1;
               resumeRef.current = element.currentTime;
               playIntentRef.current = !element.paused;
@@ -874,6 +984,7 @@ export function Player({
             } else {
               setStatus("error");
               setFailureKind("media");
+              setFailureStage(hlsFailureStage(data.details));
               setError(copy.player.error);
               setPlaying(false);
             }
@@ -893,14 +1004,15 @@ export function Player({
         }
       } catch (reason) {
         if (controller.signal.aborted) return;
-        // A provider that cannot map this title is not a media failure: name it
-        // and send the viewer to the provider picker instead of offering a
-        // pointless retry against the same source.
-        const code = reason instanceof APIError ? reason.code : "";
-        const sourceFailure = code === "INVALID_INPUT" || code === "NOT_FOUND" || code === "UNSUPPORTED";
+        // Map onto the backend's stable failure categories: a provider that
+        // cannot map this title is not a media failure — name it and send the
+        // viewer to the provider picker instead of offering a pointless retry
+        // against the same source. A timeout stays retryable and distinct.
+        const failure = classifyPlaybackFailure(reason, effectiveProvider);
         setStatus("error");
-        setFailureKind(sourceFailure ? (effectiveProvider === "auto" ? "exhausted" : "provider") : "media");
-        setError(sourceFailure ? "" : errorMessage(reason, copy.player.error));
+        setFailureKind(failure.kind);
+        setFailureStage(failure.stage);
+        setError(failure.kind === "provider" || failure.kind === "exhausted" ? "" : errorMessage(reason, copy.player.error));
         setPlaying(false);
       }
     }
@@ -949,6 +1061,75 @@ export function Player({
     if (element) element.playbackRate = sessionSpeed;
   }, [episode.id, mode, provider, retry, sessionSpeed]);
 
+  /* OS media keys and "now playing" metadata. Binding is capability-detected
+     per episode: without navigator.mediaSession nothing registers and the
+     in-app controls are the only interface. Handlers resolve through refs so
+     the active player instance answers even across remounts, and they reuse
+     the same toggle/seek paths as the in-app shortcuts — no second pipeline. */
+  useEffect(() => {
+    const session = osMediaSession();
+    if (!session) return;
+    const bind = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        session.setActionHandler(action, handler);
+      } catch {
+        // Hosts may reject actions they cannot present; that is not fatal.
+      }
+    };
+    bind("play", () => {
+      const element = videoRef.current;
+      if (element && element.paused) mediaControlsRef.current.toggle();
+    });
+    bind("pause", () => {
+      const element = videoRef.current;
+      if (element && !element.paused) mediaControlsRef.current.toggle();
+    });
+    bind("seekto", (details) => {
+      if (details && typeof details.seekTime === "number") mediaControlsRef.current.seek(details.seekTime);
+    });
+    return () => {
+      bind("play", null);
+      bind("pause", null);
+      bind("seekto", null);
+      mediaActiveRef.current = false;
+      // Stop, exit, and episode switches drop the now-playing card entirely.
+      session.metadata = null;
+      session.playbackState = "none";
+    };
+  }, [episode.id]);
+
+  useEffect(() => {
+    const session = osMediaSession();
+    if (!session) return;
+    if (playing) {
+      const episodeTitle = cleanEpisodeTitle(episode.title, episode.label, episode.ordinal);
+      const poster = anime.posterUrl ? mediaURL(anime.posterUrl) : null;
+      const factory = typeof MediaMetadata === "undefined" ? null : MediaMetadata;
+      session.metadata = factory
+        ? new factory({
+            title: episodeTitle || anime.title,
+            artist: episodeTitle ? anime.title : undefined,
+            artwork: poster ? [{ src: poster }] : [],
+          })
+        : null;
+      session.playbackState = "playing";
+      mediaActiveRef.current = true;
+    } else if (mediaActiveRef.current) {
+      // Paused media keeps its card; only the playback state changes.
+      session.playbackState = ended ? "none" : "paused";
+    }
+  }, [
+    playing,
+    ended,
+    anime.id,
+    anime.title,
+    anime.posterUrl,
+    episode.id,
+    episode.title,
+    episode.label,
+    episode.ordinal,
+  ]);
+
   useEffect(() => {
     const element = videoRef.current;
     if (!element) return;
@@ -959,6 +1140,53 @@ export function Player({
     element.addEventListener("volumechange", sync);
     return () => element.removeEventListener("volumechange", sync);
   }, []);
+
+  /* Capability detection and presentation state for picture-in-picture. The
+     standard API reports capability on `document`, the webkit one on the
+     element, so resolve both after the video mounts. Enter/leave events (or
+     the webkit mode-changed equivalent) drive the toggle's state so external
+     exits — the OS window close button — stay reflected. Unmounting leaves
+     pip before the source is torn down. */
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!element) return;
+    setPipCapable(supportsPictureInPicture(element));
+    const onEnter = () => setPipActive(true);
+    const onLeave = () => setPipActive(false);
+    const onWebKitMode = () => {
+      setPipActive((element as WebKitVideo).webkitPresentationMode === "picture-in-picture");
+    };
+    element.addEventListener("enterpictureinpicture", onEnter);
+    element.addEventListener("leavepictureinpicture", onLeave);
+    element.addEventListener("webkitpresentationmodechanged", onWebKitMode);
+    return () => {
+      element.removeEventListener("enterpictureinpicture", onEnter);
+      element.removeEventListener("leavepictureinpicture", onLeave);
+      element.removeEventListener("webkitpresentationmodechanged", onWebKitMode);
+      void exitPictureInPicture(element);
+    };
+  }, []);
+
+  async function togglePictureInPicture() {
+    const element = videoRef.current;
+    if (!element) return;
+    reveal();
+    try {
+      if (pipActive) {
+        await exitPictureInPicture(element);
+        return;
+      }
+      const doc = document as Document & { pictureInPictureEnabled?: boolean };
+      if (typeof element.requestPictureInPicture === "function" && doc.pictureInPictureEnabled) {
+        await element.requestPictureInPicture();
+        return;
+      }
+      const webkit = element as WebKitVideo;
+      await webkit.webkitSetPresentationMode?.("picture-in-picture");
+    } catch {
+      setNotice(copy.player.pipError);
+    }
+  }
 
   useEffect(() => {
     const onChange = () => setFullscreen(document.fullscreenElement === rootRef.current);
@@ -1324,6 +1552,17 @@ export function Player({
           >
             <SettingsIcon aria-hidden="true" />
           </button>
+          {pipCapable && (
+            <button
+              type="button"
+              className="player-icon player-pip"
+              onClick={() => void togglePictureInPicture()}
+              aria-label={pipActive ? copy.player.exitPip : copy.player.enterPip}
+              aria-pressed={pipActive}
+            >
+              {pipActive ? <PictureInPicture2 aria-hidden="true" /> : <PictureInPicture aria-hidden="true" />}
+            </button>
+          )}
           <button
             type="button"
             className="player-icon"
@@ -1576,25 +1815,31 @@ export function Player({
       <div className="player-error" role="alert">
         <div className="player-error__card">
           <h2 className="player-error__title">
-            {failureKind === "media" ? copy.player.error : copy.player.providerTitle}
+            {failureKind === "media"
+              ? copy.player.error
+              : failureKind === "timeout"
+                ? copy.player.timeoutTitle
+                : copy.player.providerTitle}
           </h2>
           <p className="player-error__body">
             {failureKind === "provider"
               ? copy.player.providerUnavailable
               : failureKind === "exhausted"
                 ? copy.player.noProviders
-                : copy.player.recovery}
+                : failureKind === "timeout"
+                  ? copy.player.sourceTimeout
+                  : copy.player.recovery}
           </p>
           {error && error !== copy.player.error ? <p className="player-error__detail">{error}</p> : null}
           <div className="player-error__actions">
-            {failureKind === "media" ? (
-              <button type="button" className="player-action player-action--primary" onClick={tryAgainFromError}>
+            {failureKind !== "provider" && failureKind !== "exhausted" ? (
+              <button type="button" className="player-action player-action--primary" onClick={retryFailedStage}>
                 {copy.player.retry}
               </button>
             ) : null}
             <button
               type="button"
-              className={"player-action" + (failureKind === "media" ? "" : " player-action--primary")}
+              className={"player-action" + (failureKind === "media" || failureKind === "timeout" ? "" : " player-action--primary")}
               onClick={openProviderSettings}
             >
               {copy.player.chooseProvider}
@@ -1632,7 +1877,13 @@ export function Player({
       ref={rootRef}
       className="player"
       aria-label={copy.player.region}
-      style={{ "--subtitle-scale": subtitleScale } as CSSProperties}
+      style={
+        {
+          "--subtitle-scale": subtitleScale,
+          "--subtitle-background": cueStyles.backgroundColor,
+          "--subtitle-edge": cueStyles.textShadow,
+        } as CSSProperties
+      }
       data-idle={idle ? "true" : "false"}
       data-native={nativeFallback ? "true" : "false"}
       onPointerMove={showCustomOverlay ? (event) => {
@@ -1663,6 +1914,7 @@ export function Player({
             setEnded(false);
             setStatus("ready");
             setBuffering(false);
+            publishMediaPosition(videoRef.current as HTMLVideoElement);
           }}
           onPause={() => {
             setPlaying(false);
@@ -1690,6 +1942,7 @@ export function Player({
             lastDurationRef.current = Number.isFinite(element.duration) ? element.duration : null;
             setTime(element.currentTime);
             syncBuffered();
+            publishMediaPosition(element);
             // Advancing media is proof that buffering and seeking both ended. A
             // `waiting` or `seeking` event with no matching `playing`/`seeked`
             // would otherwise hold the chrome open for good.
@@ -1702,6 +1955,7 @@ export function Player({
             const element = event.currentTarget;
             setDuration(Number.isFinite(element.duration) ? element.duration : null);
             syncBuffered();
+            publishMediaPosition(element);
           }}
           onDurationChange={(event) => {
             const element = event.currentTarget;
@@ -1719,6 +1973,9 @@ export function Player({
             if (!sessionRef.current) return;
             setStatus("error");
             setFailureKind("media");
+            // The element already holds the master playlist, so a retry
+            // reloads it rather than re-resolving.
+            setFailureStage("manifest");
             setError(copy.player.error);
             setPlaying(false);
           }}
