@@ -69,6 +69,27 @@ func (s *Store) Cache(ctx context.Context, key string, schemaVersion int) (Cache
 	return e, nil
 }
 
+// StaleCache returns the last-known entry for a key, deliberately ignoring
+// expiry: the offline catalogue path serves it labelled stale instead of
+// failing. Payloads were validated at write time; schema mismatches and
+// absent keys still fail honestly so callers never invent data.
+func (s *Store) StaleCache(ctx context.Context, key string, schemaVersion int) (CacheEntry, error) {
+	var e CacheEntry
+	var expiry string
+	err := s.db.QueryRowContext(ctx, "SELECT payload,expires_at,schema_version FROM metadata_cache WHERE key=?", key).Scan(&e.Payload, &expiry, &e.SchemaVersion)
+	if err != nil {
+		return e, normalizeError(err)
+	}
+	e.ExpiresAt, err = time.Parse(time.RFC3339Nano, expiry)
+	if err != nil {
+		return CacheEntry{}, err
+	}
+	if e.SchemaVersion != schemaVersion {
+		return CacheEntry{}, ErrNotFound
+	}
+	return e, nil
+}
+
 // ProviderMapping must represent a verified unambiguous match. Evidence records
 // the title/season/type checks, never a provider credential or streaming URL.
 type ProviderMapping struct {
