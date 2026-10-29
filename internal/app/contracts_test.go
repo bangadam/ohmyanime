@@ -33,16 +33,11 @@ type contractEnvelope struct {
 
 func newContractClient(t *testing.T) *contractClient {
 	t.Helper()
-	a, err := New(Config{Mode: "desktop", DataDir: t.TempDir(), Google: testGoogle()})
+	a, err := New(Config{Mode: "desktop", DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Desktop API calls need a Google-backed session; mint one directly so the
-	// contract tests never touch the network.
-	session, csrf, err := a.newSession("adam@example.com")
-	if err != nil {
-		t.Fatal(err)
-	}
+	credentials := a.Bootstrap()
 	server := httptest.NewServer(a.Handler())
 	t.Cleanup(func() {
 		server.Close()
@@ -60,7 +55,7 @@ func newContractClient(t *testing.T) *contractClient {
 	if err := a.db.UpsertEpisodes(ctx, []domain.Episode{{ID: "episode-a", AnimeID: "anime-a", Label: "12.5", Ordinal: 12.5, Availability: []string{"sub"}}, {ID: "episode-b", AnimeID: "anime-b", Label: "OVA-1", Ordinal: 1, Availability: []string{"sub"}}}); err != nil {
 		t.Fatal(err)
 	}
-	return &contractClient{t: t, app: a, server: server, session: session, csrf: csrf}
+	return &contractClient{t: t, app: a, server: server, session: credentials["apiToken"], csrf: credentials["csrfToken"]}
 }
 func (c *contractClient) request(method, path, body string, status int) contractEnvelope {
 	c.t.Helper()

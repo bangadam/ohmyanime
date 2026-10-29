@@ -118,7 +118,6 @@ export interface PreferencesPageProps {
   onClearHistory: () => void;
   onClearList: () => void;
   onClearCache: () => void;
-  onSignOut?: () => void;
 }
 
 export interface DetailPageProps {
@@ -134,10 +133,3 @@ export interface DetailPageProps {
   onRetry: () => void;
 }
 
-export interface SignInPageProps {
-  busy: boolean;
-  error: string;
-  configured: boolean;
-  onGoogle: () => void;
-  onCancel?: () => void;
-}

@@ -28,17 +28,6 @@ func main() {
 	if (ip == nil || !ip.IsLoopback()) && os.Getenv("MYANIME_BEHIND_TLS_PROXY") != "1" {
 		log.Fatal("Non-loopback listen requires MYANIME_BEHIND_TLS_PROXY=1 and an authenticated TLS reverse proxy")
 	}
-	google := app.GoogleConfig{
-		ClientID:            os.Getenv("MYANIME_GOOGLE_CLIENT_ID"),
-		ClientSecret:        os.Getenv("MYANIME_GOOGLE_CLIENT_SECRET"),
-		DesktopClientID:     os.Getenv("MYANIME_GOOGLE_DESKTOP_CLIENT_ID"),
-		DesktopClientSecret: os.Getenv("MYANIME_GOOGLE_DESKTOP_CLIENT_SECRET"),
-		AllowedEmails:       splitList(os.Getenv("MYANIME_GOOGLE_ALLOWED_EMAILS")),
-		AllowedDomains:      splitList(os.Getenv("MYANIME_GOOGLE_ALLOWED_DOMAINS")),
-	}
-	if google.ClientID == "" || google.ClientSecret == "" || (len(google.AllowedEmails) == 0 && len(google.AllowedDomains) == 0) {
-		log.Fatal("Google sign-in requires MYANIME_GOOGLE_CLIENT_ID, MYANIME_GOOGLE_CLIENT_SECRET and MYANIME_GOOGLE_ALLOWED_EMAILS or MYANIME_GOOGLE_ALLOWED_DOMAINS")
-	}
 	var proxies []string
 	if v := os.Getenv("MYANIME_TRUSTED_PROXIES"); v != "" {
 		proxies = strings.Split(v, ",")
@@ -47,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	application, err := app.New(app.Config{DataDir: *data, FrontendDir: *frontend, FrontendFS: frontendFS, Google: google, Mode: "web", PublicOrigin: os.Getenv("MYANIME_PUBLIC_ORIGIN"), TrustedProxyCIDRs: proxies, Development: os.Getenv("MYANIME_DEV") == "1", DevOrigin: os.Getenv("MYANIME_DEV_ORIGIN")})
+	application, err := app.New(app.Config{DataDir: *data, FrontendDir: *frontend, FrontendFS: frontendFS, Mode: "web", PublicOrigin: os.Getenv("MYANIME_PUBLIC_ORIGIN"), TrustedProxyCIDRs: proxies, Development: os.Getenv("MYANIME_DEV") == "1", DevOrigin: os.Getenv("MYANIME_DEV_ORIGIN")})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -70,14 +59,4 @@ func main() {
 			_ = srv.Close()
 		}
 	}
-}
-
-func splitList(value string) []string {
-	var out []string
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }

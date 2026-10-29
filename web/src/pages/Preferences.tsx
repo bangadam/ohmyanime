@@ -49,7 +49,6 @@ export default function Preferences({
   onClearHistory,
   onClearList,
   onClearCache,
-  onSignOut,
 }: PreferencesPageProps) {
   const [draft, setDraft] = useState<Settings>(settings);
   const [action, setAction] = useState<PendingAction>(null);
@@ -316,18 +315,6 @@ export default function Preferences({
               <p className="prefs-empty">{copy.preferences.noProviders}</p>
             )}
           </section>
-
-          {onSignOut ? (
-            <section className="prefs-section" aria-labelledby="prefs-session">
-              <SectionHeader id="prefs-session" title={copy.preferences.session} />
-              <p className="prefs-section__description">{copy.preferences.sessionDescription}</p>
-              <div className="prefs-session-action">
-                <Button variant="secondary" disabled={formPending} onClick={onSignOut}>
-                  {copy.preferences.signOut}
-                </Button>
-              </div>
-            </section>
-          ) : null}
 
           <div className="prefs-footer">
             {saveError ? <Notice tone="error" message={saveError} /> : null}

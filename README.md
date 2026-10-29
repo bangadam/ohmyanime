@@ -4,8 +4,8 @@ A self-hosted anime streaming app: browse a catalogue, track what you watch, and
 play episodes in an immersive player. Go backend, React frontend, and a native
 desktop build that ships as a single binary.
 
-Browsing is public. Watching needs a Google account, and the instance decides
-which accounts it accepts.
+No account or sign-in is needed. Playback, saved list, history, and preferences
+are available immediately and use one shared local database per instance.
 
 ![Home](assets/home.webp)
 
@@ -45,47 +45,21 @@ capability-scoped local paths, and the proxy streams bytes with range support.
 
 - Go **1.27.3+**
 - [Bun](https://bun.sh) for the frontend
-- A Google OAuth client (see below)
 - Desktop: macOS WKWebView, Windows WebView2, or Linux GTK3/WebKitGTK with media
   codecs
 
 ## Setup
 
-### 1. Google sign-in
-
-Create an OAuth **Web application** client in Google Cloud Console and register
-the callback URI:
-
-```
-http://localhost:5173/api/v1/auth/google/callback     # development
-https://your-host/api/v1/auth/google/callback         # deployment
-```
-
-For the desktop app, create a second OAuth **Desktop app** client. Google only
-allows loopback redirects on installed-app clients, so the two never mix.
-
-### 2. Configure
+### 1. Configure (optional)
 
 ```sh
 cp .env.example .env
 ```
 
-```sh
-MYANIME_GOOGLE_CLIENT_ID=…apps.googleusercontent.com
-MYANIME_GOOGLE_CLIENT_SECRET=…
-MYANIME_GOOGLE_ALLOWED_EMAILS=you@example.com
-# or allow a whole domain:
-# MYANIME_GOOGLE_ALLOWED_DOMAINS=example.com
+No account credentials are required. The defaults listen only on localhost.
+Use `.env` to customize development origins or storage.
 
-# desktop only
-MYANIME_GOOGLE_DESKTOP_CLIENT_ID=…apps.googleusercontent.com
-MYANIME_GOOGLE_DESKTOP_CLIENT_SECRET=…
-```
-
-At least one allowed email or domain is required. An empty allowlist denies every
-account — the check fails closed.
-
-### 3. Run
+### 2. Run
 
 ```sh
 # terminal 1
@@ -109,23 +83,17 @@ cd .. && go build -tags release -trimpath -o bin/myanime-desktop ./cmd/desktop
 ```
 
 The `release` tag embeds `web/dist`, so the binary needs no asset directory and
-no dev server. Sign-in opens Google in the system browser, because Google
-refuses consent inside embedded webviews.
+no dev server.
 
-## Sign-in model
+## Access model
 
-| Area | Guest | Signed in |
-|---|---|---|
-| Catalogue, seasons, schedule, search | ✅ | ✅ |
-| Title details and episode list | ✅ | ✅ |
-| Playback | asks for Google | ✅ |
-| My list, history, preferences | asks for Google | ✅ |
+The app opens directly without login. Library, history, progress, and preferences
+are shared by everyone who can reach the same instance. Existing local data is
+preserved; removing sign-in does not reset it.
 
-The web app resumes the episode you tried to play once sign-in completes. The
-desktop shell claims its session through a one-time handoff token; the bootstrap
-capability only authorizes that flow, never API access.
-
-![Sign in](assets/sign-in.webp)
+Web mutations require a matching Origin and a CSRF token from `/api/v1/capabilities`.
+The desktop shell supplies its private bootstrap bearer token directly to its
+loopback API. These request protections are not a web account access restriction.
 
 ## Deployment
 
@@ -141,6 +109,9 @@ Non-loopback listen additionally requires `MYANIME_BEHIND_TLS_PROXY=1`. Ensure t
 proxy supports byte ranges and streaming without whole-response buffering — video
 traffic passes through the server.
 
+There is no built-in account access control. Keep the server local, or restrict
+access at your reverse proxy before making it reachable by other people.
+
 ## Development
 
 ```sh
@@ -155,10 +126,6 @@ The API contract is in [openapi.yaml](openapi.yaml).
 
 | Variable | Purpose |
 |---|---|
-| `MYANIME_GOOGLE_CLIENT_ID` / `_SECRET` | Web OAuth client (required) |
-| `MYANIME_GOOGLE_DESKTOP_CLIENT_ID` / `_SECRET` | Desktop OAuth client |
-| `MYANIME_GOOGLE_ALLOWED_EMAILS` | Comma-separated allowed accounts |
-| `MYANIME_GOOGLE_ALLOWED_DOMAINS` | Comma-separated allowed domains |
 | `MYANIME_DATA_DIR` | SQLite and cache location |
 | `MYANIME_PUBLIC_ORIGIN` | Exact HTTPS origin in production |
 | `MYANIME_TRUSTED_PROXIES` | CIDRs allowed to set `X-Forwarded-Proto` |
@@ -167,7 +134,7 @@ The API contract is in [openapi.yaml](openapi.yaml).
 
 ## Notes and limits
 
-- Single-user by design. Sessions expire after 24 hours idle or 7 days absolute.
+- Single local library per instance; no account separation or login sessions.
 - Provider integrations are unofficial; upstream layouts and availability change
   without notice, and a title may exist in one provider but not another.
 - The binary is unsigned. Distributing it requires your own signing and

@@ -3,346 +3,183 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"myanime/internal/domain"
-	"myanime/internal/provider"
-	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
-)
 
-func testGoogle() GoogleConfig {
-	return GoogleConfig{
-		ClientID:            "web-client",
-		ClientSecret:        "web-secret",
-		DesktopClientID:     "desktop-client",
-		DesktopClientSecret: "desktop-secret",
-		AllowedEmails:       []string{"adam@example.com"},
-	}
-}
+	"myanime/internal/domain"
+	"myanime/internal/provider"
+)
 
 func authApp(t *testing.T, mode string) *App {
 	t.Helper()
-	a, e := New(Config{Mode: mode, DataDir: t.TempDir(), Google: testGoogle()})
-	if e != nil {
-		t.Fatal(e)
+	a, err := New(Config{Mode: mode, DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Exchange and verification are replaced so the flow can be exercised without
-	// contacting Google; the callback still runs its own state, PKCE and allowlist
-	// checks.
-	a.exchange = func(context.Context, string, string, string, string, string) (string, error) {
-		return "stub-id-token", nil
-	}
-	a.verify = func(_ context.Context, raw, audience string) (googleIdentity, error) {
-		if raw != "stub-id-token" || (audience != "web-client" && audience != "desktop-client") {
-			return googleIdentity{}, context.Canceled
-		}
-		return googleIdentity{Subject: "sub-1", Email: "adam@example.com", EmailVerified: true}, nil
-	}
-	t.Cleanup(func() { a.Close() })
+	t.Cleanup(func() { _ = a.Close() })
 	return a
 }
 
-func authRequest(a *App, method, path, body, origin string, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
+func capabilityRequest(a *App, method, path, body, origin, bearer, csrf string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, "https://localhost"+path, strings.NewReader(body))
 	r.RemoteAddr = "127.0.0.1:1234"
 	if origin != "" {
 		r.Header.Set("Origin", origin)
 	}
-	if cookie != nil {
-		r.AddCookie(cookie)
+	if bearer != "" {
+		r.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	r.Header.Set("X-CSRF-Token", csrf)
+	if csrf != "" {
+		r.Header.Set("X-CSRF-Token", csrf)
+	}
 	w := httptest.NewRecorder()
 	a.Handler().ServeHTTP(w, r)
 	return w
 }
 
-// startFlow performs the browser half of the flow and returns the session cookie
-// plus CSRF token, the way a real redirect back to the app would.
-func startFlow(t *testing.T, a *App, old *http.Cookie) (*http.Cookie, string) {
-	t.Helper()
-	w := authRequest(a, "GET", "/api/v1/auth/google/start", "", "", nil, "")
-	if w.Code != http.StatusFound {
-		t.Fatalf("start %d: %s", w.Code, w.Body.String())
+func TestWebCapabilitiesWithoutLogin(t *testing.T) {
+	a := authApp(t, "web")
+	w := capabilityRequest(a, "GET", "/api/v1/capabilities", "", "", "", "")
+	if w.Code != 200 || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("capabilities: %d %s", w.Code, w.Body.String())
 	}
-	location, e := url.Parse(w.Header().Get("Location"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	if location.Host != "accounts.google.com" {
-		t.Fatalf("unexpected provider %q", location.Host)
-	}
-	state := location.Query().Get("state")
-	challenge := location.Query().Get("code_challenge")
-	if state == "" || challenge == "" || location.Query().Get("code_challenge_method") != "S256" {
-		t.Fatalf("missing PKCE/state: %s", location.RawQuery)
-	}
-	w = authRequest(a, "GET", "/api/v1/auth/google/callback?state="+url.QueryEscape(state)+"&code=abc", "", "", old, "")
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("callback %d: %s", w.Code, w.Body.String())
-	}
-	cookies := w.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatal("missing session cookie")
-	}
-	c := cookies[0]
-	if !c.Secure || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
-		t.Fatal("unsafe cookie")
-	}
-	session := authRequest(a, "GET", "/api/v1/auth/session", "", "", c, "")
-	var payload struct {
+	var result struct {
 		Data struct {
-			Authenticated bool   `json:"authenticated"`
-			CSRF          string `json:"csrfToken"`
-			Email         string `json:"email"`
+			Desktop   bool              `json:"desktop"`
+			CSRF      string            `json:"csrfToken"`
+			Providers []json.RawMessage `json:"providers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Data.Desktop || result.Data.CSRF == "" || len(result.Data.Providers) == 0 {
+		t.Fatalf("invalid capabilities: %s", w.Body.String())
+	}
+	for _, path := range []string{"/settings", "/bookmarks", "/history", "/progress/missing", "/providers"} {
+		if w := capabilityRequest(a, "GET", "/api/v1"+path, "", "", "", ""); w.Code != 200 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
 		}
 	}
-	if e := json.Unmarshal(session.Body.Bytes(), &payload); e != nil {
-		t.Fatal(e)
-	}
-	if !payload.Data.Authenticated || payload.Data.CSRF == "" || payload.Data.Email != "adam@example.com" {
-		t.Fatalf("unexpected session: %s", session.Body.String())
-	}
-	return c, payload.Data.CSRF
-}
-
-func TestGoogleFlowCSRFAndLogout(t *testing.T) {
-	a := authApp(t, "web")
-	cookie, csrf := startFlow(t, a, nil)
-	session, e := a.media.Create(context.Background(), domain.Source{MasterURL: "https://cdn.example/master.m3u8"}, cookie.Value, "")
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, origin := range []string{"", "null", "https://evil.example"} {
-		w := authRequest(a, "POST", "/api/v1/auth/logout", "", origin, cookie, csrf)
-		if w.Code != 403 {
-			t.Fatalf("origin %q: %d", origin, w.Code)
+	for _, csrf := range []string{"", "wrong"} {
+		if w := capabilityRequest(a, "PATCH", "/api/v1/settings", `{"revision":0,"autoplay":true}`, "https://localhost", "", csrf); w.Code != 403 {
+			t.Fatalf("invalid CSRF accepted: %d", w.Code)
 		}
 	}
-	if w := authRequest(a, "POST", "/api/v1/auth/logout", "", "https://localhost", cookie, ""); w.Code != 403 {
-		t.Fatal("csrf not enforced")
+	if w := capabilityRequest(a, "PATCH", "/api/v1/settings", `{"revision":0,"autoplay":true}`, "https://localhost", "", result.Data.CSRF); w.Code != 200 {
+		t.Fatalf("no-login mutation: %d %s", w.Code, w.Body.String())
 	}
-	next, nextCSRF := startFlow(t, a, cookie)
-	if next.Value == cookie.Value || nextCSRF == csrf {
-		t.Fatal("session not rotated")
-	}
-	if w := authRequest(a, "GET", "/api/v1/bookmarks", "", "", cookie, ""); w.Code != 401 {
-		t.Fatal("old cookie accepted")
-	}
-	if _, e = a.media.AddSubtitle(session.ID, cookie.Value, "test.vtt", []byte("WEBVTT\n\n")); e == nil {
-		t.Fatal("old media survived rotation")
-	}
-	if w := authRequest(a, "POST", "/api/v1/auth/logout", "", "https://localhost", next, nextCSRF); w.Code != 204 {
-		t.Fatal(w.Code)
-	}
-	if w := authRequest(a, "GET", "/api/v1/bookmarks", "", "", next, ""); w.Code != 401 {
-		t.Fatal("revoked cookie accepted")
-	}
-}
-
-func TestGoogleFlowRejectsUnusableCallbacks(t *testing.T) {
-	a := authApp(t, "web")
-	// Unknown state, cancelled consent, and a disallowed account all fail closed.
-	if w := authRequest(a, "GET", "/api/v1/auth/google/callback?state=unknown&code=abc", "", "", nil, ""); w.Code != http.StatusSeeOther || !strings.Contains(w.Header().Get("Location"), "auth=expired") {
-		t.Fatalf("unknown state: %d %s", w.Code, w.Header().Get("Location"))
-	}
-	w := authRequest(a, "GET", "/api/v1/auth/google/start?return=/search", "", "", nil, "")
-	state, _ := url.Parse(w.Header().Get("Location"))
-	value := state.Query().Get("state")
-	denied := authRequest(a, "GET", "/api/v1/auth/google/callback?state="+url.QueryEscape(value)+"&error=access_denied", "", "", nil, "")
-	if denied.Code != http.StatusSeeOther || !strings.Contains(denied.Header().Get("Location"), "/search?auth=denied") {
-		t.Fatalf("denied: %d %s", denied.Code, denied.Header().Get("Location"))
-	}
-	w = authRequest(a, "GET", "/api/v1/auth/google/start", "", "", nil, "")
-	state, _ = url.Parse(w.Header().Get("Location"))
-	a.verify = func(context.Context, string, string) (googleIdentity, error) {
-		return googleIdentity{Subject: "sub-2", Email: "stranger@example.com", EmailVerified: true}, nil
-	}
-	notAllowed := authRequest(a, "GET", "/api/v1/auth/google/callback?state="+url.QueryEscape(state.Query().Get("state"))+"&code=abc", "", "", nil, "")
-	if notAllowed.Code != http.StatusSeeOther || !strings.Contains(notAllowed.Header().Get("Location"), "auth=not_allowed") {
-		t.Fatalf("allowlist: %d %s", notAllowed.Code, notAllowed.Header().Get("Location"))
-	}
-	// The state is single-use: replaying it cannot mint a second session.
-	replay := authRequest(a, "GET", "/api/v1/auth/google/callback?state="+url.QueryEscape(state.Query().Get("state"))+"&code=abc", "", "", nil, "")
-	if !strings.Contains(replay.Header().Get("Location"), "auth=expired") {
-		t.Fatalf("state replayed: %s", replay.Header().Get("Location"))
-	}
-}
-
-func TestGoogleStartRefusesRedirects(t *testing.T) {
-	a := authApp(t, "web")
-	w := authRequest(a, "GET", "/api/v1/auth/google/start?return=//evil.example/x", "", "", nil, "")
-	state, _ := url.Parse(w.Header().Get("Location"))
-	flow := a.flow(state.Query().Get("state"))
-	if flow == nil || flow.returnTo != "/" {
-		t.Fatalf("protocol-relative return accepted: %+v", flow)
-	}
-	if w := authRequest(a, "GET", "/api/v1/auth/google/start?return="+url.QueryEscape("https://evil.example"), "", "", nil, ""); w.Code != http.StatusFound {
-		t.Fatal(w.Code)
-	}
-}
-
-func TestGoogleAllowlistRules(t *testing.T) {
-	a := authApp(t, "web")
-	for _, tc := range []struct {
-		email string
-		want  bool
-	}{{"adam@example.com", true}, {"Adam@Example.com", true}, {"other@example.com", false}, {"", false}, {"no-at-sign", false}} {
-		if got := a.googleAllowed(tc.email); got != tc.want {
-			t.Fatalf("%q: %v", tc.email, got)
+	for _, origin := range []string{"", "https://evil.example"} {
+		if w := capabilityRequest(a, "DELETE", "/api/v1/history?confirmed=true", "", origin, "", result.Data.CSRF); w.Code != 403 {
+			t.Fatalf("invalid origin accepted: %d", w.Code)
 		}
 	}
-	a.cfg.Google.AllowedEmails = nil
-	a.cfg.Google.AllowedDomains = []string{"Example.com"}
-	if !a.googleAllowed("anyone@example.com") || a.googleAllowed("anyone@evil.example") {
-		t.Fatal("domain allowlist broken")
-	}
-	a.cfg.Google.AllowedEmails = nil
-	a.cfg.Google.AllowedDomains = nil
-	if a.googleAllowed("adam@example.com") {
-		t.Fatal("empty allowlist must deny")
-	}
-	if a.googleConfigured() {
-		t.Fatal("empty allowlist must not report a usable configuration")
-	}
 }
 
-func TestGoogleNotConfigured(t *testing.T) {
-	a, e := New(Config{Mode: "web", DataDir: t.TempDir()})
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(func() { a.Close() })
-	if w := authRequest(a, "GET", "/api/v1/auth/google/start", "", "", nil, ""); w.Code != 503 {
-		t.Fatalf("start without configuration: %d", w.Code)
-	}
-	session := authRequest(a, "GET", "/api/v1/auth/session", "", "", nil, "")
-	if !strings.Contains(session.Body.String(), `"configured":false`) {
-		t.Fatalf("session: %s", session.Body.String())
-	}
-	if w := authRequest(a, "GET", "/api/v1/providers", "", "", nil, ""); w.Code != 200 {
-		t.Fatal("public catalogue read denied")
-	}
-	if w := authRequest(a, "POST", "/api/v1/playback/sessions", `{"animeId":"a","episodeId":"b","mode":"sub"}`, "https://localhost", nil, ""); w.Code != 401 {
-		t.Fatal("playback without a session accepted")
-	}
-}
-
-func TestDesktopClaimDeliversSessionOnce(t *testing.T) {
+func TestDesktopBootstrapCapability(t *testing.T) {
 	a := authApp(t, "desktop")
-	r := httptest.NewRequest("GET", "http://127.0.0.1:1/api/v1/auth/google/start", nil)
-	r.Header.Set("Authorization", "Bearer "+a.token)
-	w := httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("desktop start %d: %s", w.Code, w.Body.String())
-	}
-	var start struct {
-		Data struct {
-			URL       string `json:"url"`
-			Handoff   string `json:"handoff"`
-			PollToken string `json:"pollToken"`
+	credentials := a.Bootstrap()
+	for _, bearer := range []string{"", "wrong"} {
+		for _, path := range []string{"/capabilities", "/providers", "/settings", "/bookmarks"} {
+			if w := capabilityRequest(a, "GET", "/api/v1"+path, "", "", bearer, ""); w.Code != 401 {
+				t.Fatalf("%s without capability: %d", path, w.Code)
+			}
 		}
 	}
-	if e := json.Unmarshal(w.Body.Bytes(), &start); e != nil {
-		t.Fatal(e)
+	w := capabilityRequest(a, "GET", "/api/v1/capabilities", "", "mygo://localhost", credentials["apiToken"], "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"desktop":true`) || !strings.Contains(w.Body.String(), credentials["csrfToken"]) {
+		t.Fatalf("bootstrap rejected: %d %s", w.Code, w.Body.String())
 	}
-	if start.Data.URL == "" || start.Data.Handoff == "" || start.Data.PollToken == "" {
-		t.Fatalf("incomplete start: %s", w.Body.String())
+	if w := capabilityRequest(a, "DELETE", "/api/v1/history?confirmed=true", "", "mygo://localhost", credentials["apiToken"], ""); w.Code != 403 {
+		t.Fatal("desktop mutation without CSRF accepted")
 	}
-	state, _ := url.Parse(start.Data.URL)
-	// The shell opens the URL in the system browser; the callback then lands here.
-	callback := authRequest(a, "GET", "/api/v1/auth/google/callback?state="+url.QueryEscape(state.Query().Get("state"))+"&code=abc", "", "", nil, "")
-	if callback.Code != 200 || !strings.Contains(callback.Body.String(), "Signed in") {
-		t.Fatalf("desktop callback %d", callback.Code)
+	if w := capabilityRequest(a, "DELETE", "/api/v1/history?confirmed=true", "", "mygo://localhost", credentials["apiToken"], credentials["csrfToken"]); w.Code != 204 {
+		t.Fatalf("desktop mutation: %d %s", w.Code, w.Body.String())
 	}
-	claim := func(poll string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("POST", "http://127.0.0.1:1/api/v1/auth/google/claim", strings.NewReader(`{"handoff":"`+start.Data.Handoff+`","pollToken":"`+poll+`"}`))
-		r.Header.Set("Authorization", "Bearer "+a.token)
-		r.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		a.Handler().ServeHTTP(rec, r)
-		return rec
-	}
-	if w := claim("wrong"); w.Code != 400 {
-		t.Fatalf("wrong poll token accepted: %d", w.Code)
-	}
-	w = claim(start.Data.PollToken)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"authenticated":true`) {
-		t.Fatalf("claim %d: %s", w.Code, w.Body.String())
-	}
-	if w := claim(start.Data.PollToken); w.Code != 400 {
-		t.Fatal("session delivered twice")
-	}
-}
-
-func TestDesktopNeedsASessionNotJustCapability(t *testing.T) {
-	a := authApp(t, "desktop")
-	r := httptest.NewRequest("GET", "http://127.0.0.1:1/api/v1/providers", nil)
-	r.Header.Set("Authorization", "Bearer "+a.token)
-	w := httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("public read denied: %d", w.Code)
-	}
-	r = httptest.NewRequest("GET", "http://evil.example/api/v1/providers", nil)
-	r.Header.Set("Authorization", "Bearer "+a.token)
+	r := httptest.NewRequest("GET", "http://evil.example/api/v1/capabilities", nil)
+	r.Header.Set("Authorization", "Bearer "+credentials["apiToken"])
 	w = httptest.NewRecorder()
 	a.Handler().ServeHTTP(w, r)
 	if w.Code != 403 {
-		t.Fatal("forged host accepted")
+		t.Fatal("desktop foreign host accepted")
 	}
-	session, csrf, err := a.newSession("adam@example.com")
+}
+
+func TestRemovedAuthEndpoints(t *testing.T) {
+	for _, mode := range []string{"web", "desktop"} {
+		a := authApp(t, mode)
+		for _, endpoint := range []struct{ method, path string }{
+			{"GET", "/session"}, {"GET", "/google/start"}, {"GET", "/google/callback"},
+			{"POST", "/google/claim"}, {"POST", "/logout"},
+		} {
+			w := capabilityRequest(a, endpoint.method, "/api/v1/auth"+endpoint.path, "", "https://localhost", a.token, a.token)
+			if w.Code != 404 || len(w.Result().Cookies()) != 0 {
+				t.Fatalf("%s %s still available: %d", mode, endpoint.path, w.Code)
+			}
+		}
+	}
+}
+
+func TestInstanceMediaOwnership(t *testing.T) {
+	for _, mode := range []string{"web", "desktop"} {
+		a := authApp(t, mode)
+		r := httptest.NewRequest("GET", "https://localhost/api/v1/capabilities", nil)
+		r.Header.Set("Authorization", "Bearer "+a.token)
+		p, ok := a.identity(r)
+		if !ok || p.owner != a.token {
+			t.Fatal("missing instance owner")
+		}
+		session, err := a.media.Create(context.Background(), domain.Source{MasterURL: "https://cdn.example/master.m3u8"}, p.owner, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.media.Revoke(session.ID, "other-instance") {
+			t.Fatal("foreign instance revoked media")
+		}
+		if !a.media.Revoke(session.ID, p.owner) {
+			t.Fatal("instance could not revoke its media")
+		}
+	}
+}
+
+func TestNoLoginPreservesExistingDatabase(t *testing.T) {
+	dataDir := t.TempDir()
+	a, err := New(Config{Mode: "web", DataDir: dataDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r = httptest.NewRequest("GET", "http://127.0.0.1:1/api/v1/providers", nil)
-	r.Header.Set("Authorization", "Bearer "+session)
-	w = httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
+	w := capabilityRequest(a, "PATCH", "/api/v1/settings", `{"revision":0,"quality":"720p"}`, "https://localhost", "", a.token)
 	if w.Code != 200 {
-		t.Fatalf("session read %d", w.Code)
+		_ = a.Close()
+		t.Fatalf("save settings: %d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest("POST", "http://127.0.0.1:1/api/v1/auth/logout", nil)
-	r.Header.Set("Authorization", "Bearer "+session)
-	w = httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
+	oldToken := a.token
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err = New(Config{Mode: "web", DataDir: dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.token == oldToken {
+		t.Fatal("instance capability survived restart")
+	}
+	w = capabilityRequest(a, "GET", "/api/v1/settings", "", "", "", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"quality":"720p"`) {
+		t.Fatalf("existing settings lost: %d %s", w.Code, w.Body.String())
+	}
+	w = capabilityRequest(a, "DELETE", "/api/v1/history?confirmed=true", "", "https://localhost", "", oldToken)
 	if w.Code != 403 {
-		t.Fatalf("desktop mutation without csrf: %d", w.Code)
-	}
-	r.Header.Set("X-CSRF-Token", csrf)
-	w = httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
-	if w.Code != 204 {
-		t.Fatalf("desktop mutation with csrf: %d", w.Code)
-	}
-}
-
-func TestAuthExpiry(t *testing.T) {
-	a := authApp(t, "web")
-	for _, tc := range []struct {
-		name          string
-		created, last time.Time
-	}{{"idle", time.Now().Add(-25 * time.Hour), time.Now().Add(-25 * time.Hour)}, {"hard", time.Now().Add(-8 * 24 * time.Hour), time.Now()}} {
-		t.Run(tc.name, func(t *testing.T) {
-			a.sessions[tc.name] = loginSession{csrf: "csrf", email: "adam@example.com", created: tc.created, last: tc.last}
-			w := authRequest(a, "GET", "/api/v1/bookmarks", "", "", &http.Cookie{Name: "myanime_session", Value: tc.name}, "")
-			if w.Code != 401 {
-				t.Fatal(w.Code)
-			}
-			if _, ok := a.sessions[tc.name]; ok {
-				t.Fatal("expired session retained")
-			}
-		})
+		t.Fatal("previous instance CSRF accepted")
 	}
 }
 
 func TestForwardedTLSAndDevelopmentOrigins(t *testing.T) {
 	a := authApp(t, "web")
-	r := httptest.NewRequest("GET", "http://localhost/api/v1/auth/session", nil)
+	r := httptest.NewRequest("GET", "http://localhost/api/v1/capabilities", nil)
 	r.RemoteAddr = "203.0.113.1:1234"
 	r.Header.Set("X-Forwarded-Proto", "https")
 	w := httptest.NewRecorder()

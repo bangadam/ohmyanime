@@ -98,81 +98,14 @@ export class APIError extends Error {
     this.name = "APIError";
   }
 }
-export function setCSRF(token: string) {
-  bootstrap.csrfToken = token;
-}
-
-/**
- * The desktop webview runs on mygo:// and cannot share the web session cookie,
- * so after Google sign-in the shell keeps the session token here and sends it
- * as a bearer credential. The bootstrap token is only a capability: it starts
- * and claims the sign-in flow and is never accepted as a session.
- */
-let sessionToken = "";
-export function setSessionToken(token: string) {
-  sessionToken = token;
-}
 export function sessionBearer(): string {
-  return sessionToken;
+  return bootstrap.apiToken;
 }
 
-export interface SessionInfo {
-  authenticated: boolean;
+export interface Capabilities {
   csrfToken: string;
   desktop: boolean;
-  email?: string;
-  capability?: boolean;
-  google: { configured: boolean };
-}
-
-export interface DesktopSignIn {
-  url: string;
-  handoff: string;
-  pollToken: string;
-}
-
-export interface ClaimResult {
-  authenticated?: boolean;
-  pending?: boolean;
-  apiToken?: string;
-  csrfToken?: string;
-  email?: string;
-}
-
-/**
- * Desktop sign-in starts with the bootstrap capability, which only authorizes
- * the flow endpoints. These calls bypass `api()` so the capability never leaks
- * into ordinary requests.
- */
-async function flow<T>(path: string, body?: unknown): Promise<T> {
-  const headers = new Headers({ "X-CSRF-Token": bootstrap.csrfToken });
-  if (bootstrap.apiToken) headers.set("Authorization", "Bearer " + bootstrap.apiToken);
-  if (body !== undefined) headers.set("Content-Type", "application/json");
-  const response = await fetch(bootstrap.apiBase + "/api/v1" + path, {
-    method: body === undefined ? "GET" : "POST",
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: "omit",
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const code = payload?.error?.code || "REQUEST_FAILED";
-    throw new APIError(code, errorMessage(new APIError(code, "", response.status)), response.status);
-  }
-  return payload.data as T;
-}
-
-export function desktopSignIn(): Promise<DesktopSignIn> {
-  return flow<DesktopSignIn>("/auth/google/start");
-}
-
-export function claimDesktopSignIn(handoff: string, pollToken: string): Promise<ClaimResult> {
-  return flow<ClaimResult>("/auth/google/claim", { handoff, pollToken });
-}
-
-export function googleSignInURL(returnTo: string): string {
-  const base = bootstrap.apiBase || location.origin;
-  return base + "/api/v1/auth/google/start?return=" + encodeURIComponent(returnTo);
+  providers: Provider[];
 }
 
 export function mediaURL(path: string) {
@@ -181,9 +114,12 @@ export function mediaURL(path: string) {
 export function isDesktop() {
   return bootstrap.desktop;
 }
-export async function initialize() {
+export async function initialize(): Promise<Capabilities> {
   if (isMyGo()) bootstrap = (await call("Bootstrap.Get")) as Bootstrap;
-  return bootstrap;
+  const capabilities = await api<Capabilities>("/capabilities");
+  bootstrap.csrfToken = capabilities.csrfToken;
+  bootstrap.desktop = capabilities.desktop;
+  return capabilities;
 }
 
 /**
@@ -195,13 +131,6 @@ export function errorMessage(reason: unknown, fallback: string = copy.states.req
   switch (reason.code) {
     case "OFFLINE":
       return copy.states.offline;
-    case "AUTH_NOT_CONFIGURED":
-      return copy.auth.notConfigured;
-    case "DENIED":
-      return copy.auth.notAllowed;
-    case "UNAUTHORIZED":
-    case "SESSION_EXPIRED":
-      return copy.auth.sessionEnded;
     case "CSRF_DENIED":
     case "ORIGIN_DENIED":
       return "This request was blocked. Reload the page and try again.";
@@ -255,7 +184,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     response = await fetch(bootstrap.apiBase + "/api/v1" + path, {
       ...init,
       headers,
-      credentials: bootstrap.desktop ? "omit" : "same-origin",
+      credentials: "omit",
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
@@ -264,7 +193,6 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (response.status === 204) return undefined as T;
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    if (response.status === 401) window.dispatchEvent(new Event("myanime:unauthorized"));
     const code = body?.error?.code || "REQUEST_FAILED";
     throw new APIError(code, errorMessage(new APIError(code, "", response.status, Boolean(body?.error?.retryable))), response.status, Boolean(body?.error?.retryable));
   }

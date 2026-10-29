@@ -1,10 +1,9 @@
 /*
   App shell — restrained cinematic top navigation on wide screens and a
   compact header plus safe-area-aware bottom navigation on narrow screens.
-  One skip link, one main landmark, named utility controls, no invented account
-  management: the utility menu only exposes the existing sign-out action.
+  One skip link, one main landmark, and named utility controls.
 */
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowUp,
   Bookmark,
@@ -12,11 +11,8 @@ import {
   Film,
   History,
   Home,
-  LogIn,
-  LogOut,
   Search,
   Settings,
-  User,
   type LucideIcon,
 } from "lucide-react";
 import { isDesktop } from "../api";
@@ -30,12 +26,6 @@ export interface AppShellProps {
   view: NavKey | null;
   onNavigate: (view: NavKey) => void;
   onSearch: () => void;
-  /** True once a Google session exists; guests see a sign-in affordance. */
-  signedIn?: boolean;
-  /** Opens Google sign-in; used when the visitor is browsing as a guest. */
-  onSignIn?: () => void;
-  /** Signs out; only meaningful for a signed-in visitor. */
-  onLogout?: () => void;
   children: ReactNode;
 }
 
@@ -55,9 +45,8 @@ const MOBILE_NAV: { key: NavKey; label: string; Icon: LucideIcon }[] = [
   { key: "settings", label: "Settings", Icon: Settings },
 ];
 
-export function AppShell({ view, onNavigate, onSearch, signedIn = true, onSignIn, onLogout, children }: AppShellProps) {
+export function AppShell({ view, onNavigate, onSearch, children }: AppShellProps) {
   const desktop = isDesktop();
-  const showAccountMenu = signedIn && !desktop && Boolean(onLogout);
 
   return (
     <div className={desktop ? "app-shell app-shell--desktop" : "app-shell"}>
@@ -108,14 +97,6 @@ export function AppShell({ view, onNavigate, onSearch, signedIn = true, onSignIn
               aria-current={view === "settings" ? "page" : undefined}
               onClick={() => onNavigate("settings")}
             />
-            {showAccountMenu && onLogout ? <AccountMenu onLogout={onLogout} /> : null}
-            {!signedIn && onSignIn ? (
-              <IconButton
-                label={copy.auth.title}
-                icon={<LogIn size={20} strokeWidth={1.7} />}
-                onClick={onSignIn}
-              />
-            ) : null}
           </div>
         </div>
       </header>
@@ -141,10 +122,6 @@ export function AppShell({ view, onNavigate, onSearch, signedIn = true, onSignIn
             aria-current={view === "history" ? "page" : undefined}
             onClick={() => onNavigate("history")}
           />
-          {showAccountMenu && onLogout ? <AccountMenu onLogout={onLogout} /> : null}
-          {!signedIn && onSignIn ? (
-            <IconButton label={copy.auth.title} icon={<LogIn size={20} strokeWidth={1.7} />} onClick={onSignIn} />
-          ) : null}
         </div>
       </header>
 
@@ -214,85 +191,6 @@ function BackToTop() {
       <ArrowUp size={18} strokeWidth={1.8} aria-hidden="true" />
       <span className="back-to-top__label">{copy.backToTop}</span>
     </button>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Account utility menu (web only)                                     */
-/* ------------------------------------------------------------------ */
-
-function AccountMenu({ onLogout }: { onLogout: () => void }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const itemRef = useRef<HTMLButtonElement>(null);
-  const panelId = useId();
-
-  useEffect(() => {
-    if (!open) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    const frame = window.requestAnimationFrame(() => itemRef.current?.focus());
-
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-      window.cancelAnimationFrame(frame);
-    };
-  }, [open]);
-
-  return (
-    <div
-      className="account-menu"
-      ref={containerRef}
-      onBlur={(event) => {
-        if (!open) return;
-        const next = event.relatedTarget;
-        if (!(next instanceof Node) || !event.currentTarget.contains(next)) setOpen(false);
-      }}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        className="icon-btn icon-btn--raised account-menu__trigger"
-        aria-label={copy.nav.account}
-        title={copy.nav.account}
-        aria-expanded={open}
-        aria-controls={open ? panelId : undefined}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className="icon-btn__glyph" aria-hidden="true">
-          <User size={19} strokeWidth={1.7} />
-        </span>
-      </button>
-      {open ? (
-        <div className="account-menu__panel" id={panelId}>
-          <button
-            ref={itemRef}
-            type="button"
-            className="account-menu__item"
-            onClick={() => {
-              setOpen(false);
-              onLogout();
-            }}
-          >
-            <LogOut size={17} strokeWidth={1.7} aria-hidden="true" />
-            <span>{copy.nav.logout}</span>
-          </button>
-        </div>
-      ) : null}
-    </div>
   );
 }
 

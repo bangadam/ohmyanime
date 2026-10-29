@@ -4,7 +4,7 @@
   "info": {
     "title": "MyAnime HTTP API",
     "version": "1.0.0",
-    "description": "Shared desktop/web contract. JSON UTF-8, opaque IDs, RFC3339 UTC timestamps, finite nonnegative seconds. Authenticated API calls use desktop bearer OR web session cookie; cookie mutations also require Origin and X-CSRF-Token. Media uses session-scoped capability URLs outside /api/v1. Optional metadata fields may be omitted when unknown."
+    "description": "Shared desktop/web contract. JSON UTF-8, opaque IDs, RFC3339 UTC timestamps, finite nonnegative seconds. Web access needs no account and shares one local library. Desktop requests use the shell bootstrap bearer token. Mutations require X-CSRF-Token from capabilities/bootstrap; web mutations also require Origin. Media uses session-scoped capability URLs outside /api/v1. Optional metadata fields may be omitted when unknown."
   },
   "servers": [
     {
@@ -15,15 +15,13 @@
     {
       "desktopBearer": []
     },
-    {
-      "webSession": []
-    }
+    {}
   ],
   "paths": {
     "/api/v1/cache": {
       "delete": {
         "operationId": "clearCache",
-        "description": "Deletes cached metadata and provider mappings only. Cookie authentication requires Origin and X-CSRF-Token.",
+        "description": "Deletes cached metadata and provider mappings only. Requires X-CSRF-Token and, on web, Origin.",
         "parameters": [
           {"name": "confirmed", "in": "query", "required": true, "schema": {"type": "boolean", "const": true}},
           {"$ref": "#/components/parameters/csrf"}
@@ -88,281 +86,10 @@
         "security": []
       }
     },
-    "/api/v1/auth/session": {
-      "get": {
-        "operationId": "getAuthSession",
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AuthSessionResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Error400"
-          },
-          "401": {
-            "$ref": "#/components/responses/Error401"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error403"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error404"
-          },
-          "409": {
-            "$ref": "#/components/responses/Error409"
-          },
-          "410": {
-            "$ref": "#/components/responses/Error410"
-          },
-          "422": {
-            "$ref": "#/components/responses/Error422"
-          },
-          "429": {
-            "$ref": "#/components/responses/Error429"
-          },
-          "502": {
-            "$ref": "#/components/responses/Error502"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error503"
-          },
-          "504": {
-            "$ref": "#/components/responses/Error504"
-          }
-        },
-        "security": []
-      }
-    },
-    "/api/v1/auth/google/start": {
-      "get": {
-        "operationId": "startGoogleSignIn",
-        "description": "Begins the Google authorization-code flow with PKCE. Web clients navigate here and are redirected to Google. Desktop shells call it with the bootstrap capability and receive a URL to open in the system browser plus handoff and poll tokens.",
-        "parameters": [
-          {
-            "name": "return",
-            "in": "query",
-            "required": false,
-            "description": "Application path to return to after sign-in. Absolute and protocol-relative values are reduced to /.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Desktop only: URL to open and the tokens needed to claim the session.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "url": {
-                          "type": "string"
-                        },
-                        "handoff": {
-                          "type": "string"
-                        },
-                        "pollToken": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "url",
-                        "handoff",
-                        "pollToken"
-                      ]
-                    },
-                    "requestId": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "requestId"
-                  ]
-                }
-              }
-            }
-          },
-          "302": {
-            "description": "Web only: redirect to Google's consent screen."
-          },
-          "401": {
-            "$ref": "#/components/responses/Error401"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error503"
-          }
-        },
-        "security": []
-      }
-    },
-    "/api/v1/auth/google/callback": {
-      "get": {
-        "operationId": "googleSignInCallback",
-        "description": "Google redirects here. The state, PKCE verifier, ID-token audience, verified email and allowlist are all checked before a session is created. Web sessions are set as an HTTP-only cookie; desktop sessions are held until the shell claims them.",
-        "parameters": [
-          {
-            "name": "state",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "code",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "error",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Desktop only: HTML confirmation page; the shell claims the session separately."
-          },
-          "303": {
-            "description": "Web: redirect back to the application with ?auth=ok, denied, not_allowed, expired or failed."
-          }
-        },
-        "security": []
-      }
-    },
-    "/api/v1/auth/google/claim": {
-      "post": {
-        "operationId": "claimDesktopSignIn",
-        "description": "Desktop only. Exchanges the handoff and poll tokens for the finished session, exactly once.",
-        "responses": {
-          "200": {
-            "description": "Session ready.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "authenticated": {
-                          "type": "boolean"
-                        },
-                        "apiToken": {
-                          "type": "string",
-                          "description": "Session token the shell sends as a bearer credential."
-                        },
-                        "csrfToken": {
-                          "type": "string"
-                        },
-                        "email": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "authenticated",
-                        "apiToken",
-                        "csrfToken",
-                        "email"
-                      ]
-                    },
-                    "requestId": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "data",
-                    "requestId"
-                  ]
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Sign-in still in progress in the browser."
-          },
-          "400": {
-            "$ref": "#/components/responses/Error400"
-          },
-          "401": {
-            "$ref": "#/components/responses/Error401"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error403"
-          }
-        },
-        "security": []
-      }
-    },
-    "/api/v1/auth/logout": {
-      "post": {
-        "operationId": "logout",
-        "responses": {
-          "204": {
-            "description": "No content"
-          },
-          "400": {
-            "$ref": "#/components/responses/Error400"
-          },
-          "401": {
-            "$ref": "#/components/responses/Error401"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error403"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error404"
-          },
-          "409": {
-            "$ref": "#/components/responses/Error409"
-          },
-          "410": {
-            "$ref": "#/components/responses/Error410"
-          },
-          "422": {
-            "$ref": "#/components/responses/Error422"
-          },
-          "429": {
-            "$ref": "#/components/responses/Error429"
-          },
-          "502": {
-            "$ref": "#/components/responses/Error502"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error503"
-          },
-          "504": {
-            "$ref": "#/components/responses/Error504"
-          }
-        },
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/csrf"
-          }
-        ],
-        "description": "Revokes the login session and all playback sessions owned by it."
-      }
-    },
     "/api/v1/capabilities": {
       "get": {
         "operationId": "getCapabilities",
+        "description": "Initializes the app without sign-in. Returns providers and the mutation CSRF token. Desktop requires the shell bootstrap bearer token.",
         "responses": {
           "200": {
             "description": "Success",
@@ -880,7 +607,7 @@
     "/api/v1/bookmarks": {
       "delete": {
         "operationId": "clearBookmarks",
-        "description": "Deletes bookmarks only after explicit confirmation; history and progress remain intact. Cookie authentication requires Origin and X-CSRF-Token.",
+        "description": "Deletes bookmarks only after explicit confirmation; history and progress remain intact. Requires X-CSRF-Token and, on web, Origin.",
         "parameters": [
           {"name": "confirmed", "in": "query", "required": true, "schema": {"type": "boolean", "const": true}},
           {"$ref": "#/components/parameters/csrf"}
@@ -1613,7 +1340,7 @@
       "get": {
         "operationId": "getMedia",
         "security": [],
-        "description": "Capability-authenticated local resource. Not a JSON envelope. Valid access extends idle expiry up to hard expiry; revoke/logout/shutdown invalidate tokens.",
+        "description": "Capability-authenticated local resource. Not a JSON envelope. Valid access extends idle expiry up to hard expiry; revoke/shutdown invalidate tokens.",
         "parameters": [
           {
             "name": "sessionToken",
@@ -2037,7 +1764,7 @@
       "head": {
         "operationId": "headMedia",
         "security": [],
-        "description": "Capability-authenticated local resource. Not a JSON envelope. Valid access extends idle expiry up to hard expiry; revoke/logout/shutdown invalidate tokens.",
+        "description": "Capability-authenticated local resource. Not a JSON envelope. Valid access extends idle expiry up to hard expiry; revoke/shutdown invalidate tokens.",
         "parameters": [
           {
             "name": "sessionToken",
@@ -2884,45 +2611,6 @@
           "lastWatchedAt"
         ]
       },
-      "AuthSession": {
-        "type": "object",
-        "properties": {
-          "authenticated": {
-            "type": "boolean"
-          },
-          "csrfToken": {
-            "type": "string"
-          },
-          "desktop": {
-            "type": "boolean"
-          },
-          "email": {
-            "type": "string",
-            "description": "Verified Google account email for an authenticated session."
-          },
-          "capability": {
-            "type": "boolean",
-            "description": "Desktop only: whether the request carried the bootstrap capability. The capability authorizes the Google sign-in flow endpoints only, never API access."
-          },
-          "google": {
-            "type": "object",
-            "properties": {
-              "configured": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "configured"
-            ]
-          }
-        },
-        "required": [
-          "authenticated",
-          "csrfToken",
-          "desktop",
-          "google"
-        ]
-      },
       "Capabilities": {
         "type": "object",
         "properties": {
@@ -3305,21 +2993,6 @@
           "requestId"
         ]
       },
-      "AuthSessionResponse": {
-        "type": "object",
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/AuthSession"
-          },
-          "requestId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "data",
-          "requestId"
-        ]
-      },
       "CapabilitiesResponse": {
         "type": "object",
         "properties": {
@@ -3506,12 +3179,6 @@
         "type": "http",
         "scheme": "bearer",
         "description": "Desktop bootstrap token, loopback only."
-      },
-      "webSession": {
-        "type": "apiKey",
-        "in": "cookie",
-        "name": "myanime_session",
-        "description": "HttpOnly SameSite session cookie."
       }
     },
     "parameters": {
@@ -3539,11 +3206,11 @@
       "csrf": {
         "name": "X-CSRF-Token",
         "in": "header",
-        "required": false,
+        "required": true,
         "schema": {
           "type": "string"
         },
-        "description": "Required X-CSRF-Token for cookie-authenticated mutations; supplied by session/login/bootstrap."
+        "description": "Required for mutations; supplied by capabilities or desktop bootstrap. Web mutations additionally require a matching Origin."
       }
     },
     "responses": {
@@ -3558,7 +3225,7 @@
         }
       },
       "Error401": {
-        "description": "Authentication required",
+        "description": "Valid desktop bootstrap bearer token required",
         "content": {
           "application/json": {
             "schema": {

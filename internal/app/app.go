@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"myanime/internal/domain"
@@ -25,45 +25,25 @@ import (
 	"myanime/internal/store"
 )
 
-// GoogleConfig configures the only accepted sign-in method. Web and desktop use
-// separate OAuth clients because Google only permits loopback redirects for
-// installed-app clients.
-type GoogleConfig struct {
-	ClientID, ClientSecret               string
-	DesktopClientID, DesktopClientSecret string
-	AllowedEmails, AllowedDomains        []string
-}
-
 type Config struct {
 	DataDir, FrontendDir, Mode string
 	PublicOrigin, DevOrigin    string
 	Development                bool
-	Google                     GoogleConfig
 	TrustedProxyCIDRs          []string
 	FrontendFS                 fs.FS
 }
 
-type loginSession struct {
-	csrf          string
-	email         string
-	created, last time.Time
-}
 type App struct {
 	cfg          Config
 	db           *store.Store
 	catalog      *provider.Service
 	media        *media.Manager
 	token        string
-	mu           sync.Mutex
-	sessions     map[string]loginSession
-	flows        map[string]*oauthFlow
 	mux          *http.ServeMux
 	trusted      []*net.IPNet
 	resolveSlots chan struct{}
-	exchange     func(context.Context, string, string, string, string, string) (string, error)
-	verify       func(context.Context, string, string) (googleIdentity, error)
 }
-type principal struct{ owner, csrf, email string }
+type principal struct{ owner, csrf string }
 
 func randomToken() string {
 	b := make([]byte, 32)
@@ -109,8 +89,7 @@ func New(cfg Config) (*App, error) {
 	}
 	a := &App{
 		cfg: cfg, db: db, catalog: provider.New(), media: media.New(), token: randomToken(),
-		sessions: make(map[string]loginSession), flows: make(map[string]*oauthFlow), mux: http.NewServeMux(),
-		exchange: exchangeCode, verify: verifyGoogleIDToken,
+		mux: http.NewServeMux(),
 	}
 	a.trusted = proxies
 	a.resolveSlots = make(chan struct{}, 8)
@@ -185,7 +164,6 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Add("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 	if a.cfg.Mode == "web" && r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS" && origin == "" {
 		failure(w, 403, "ORIGIN_DENIED", "Origin required")
@@ -284,74 +262,35 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 func (a *App) identity(r *http.Request) (principal, bool) {
-	// Every API call, desktop included, needs a Google-backed session. The web
-	// app carries it in a cookie; the desktop webview runs on mygo:// and cannot
-	// share that cookie, so it sends the session token as a bearer credential.
-	// The bootstrap capability is never a session: it only authorizes starting
-	// and claiming the sign-in flow.
-	token := ""
 	if a.cfg.Mode == "desktop" {
 		value, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || constantTimeEqual(value, a.token) {
+		if !ok || !constantTimeEqual(value, a.token) {
 			return principal{}, false
 		}
-		token = value
-	} else {
-		c, e := r.Cookie("myanime_session")
-		if e != nil {
-			return principal{}, false
-		}
-		token = c.Value
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[token]
-	if !ok {
-		a.mu.Unlock()
-		return principal{}, false
-	}
-	now := time.Now()
-	if now.Sub(s.last) > 24*time.Hour || now.Sub(s.created) > 7*24*time.Hour {
-		delete(a.sessions, token)
-		a.mu.Unlock()
-		a.media.RevokeOwner(token)
-		return principal{}, false
-	}
-	s.last = now
-	a.sessions[token] = s
-	a.mu.Unlock()
-	return principal{owner: token, csrf: s.csrf, email: s.email}, true
+	return principal{owner: a.token, csrf: a.token}, true
 }
 func (a *App) protect(fn func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := a.identity(r)
 		if !ok {
-			failure(w, 401, "UNAUTHORIZED", "Sign in required")
+			failure(w, 401, "UNAUTHORIZED", "Invalid desktop capability")
 			return
 		}
-		// Both the cookie session and the desktop bearer session carry a CSRF
-		// token; a mutation must prove it.
+		// Mutations require the instance CSRF token in both modes.
 		if r.Method != "GET" && r.Method != "HEAD" && !constantTimeEqual(r.Header.Get("X-CSRF-Token"), p.csrf) {
-			failure(w, 403, "CSRF_DENIED", "Invalid session")
+			failure(w, 403, "CSRF_DENIED", "Invalid CSRF token")
 			return
 		}
 		fn(w, r, p)
 	}
 }
 
-// public serves read-only catalogue data without a session. Playback, bookmarks,
-// history, progress and settings stay behind protect: browsing is open, watching
-// is not.
-func (a *App) public(fn func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" && r.Method != "HEAD" {
-			failure(w, 405, "DENIED", "Method not allowed")
-			return
-		}
-		p, _ := a.identity(r)
-		fn(w, r, p)
-	}
-}
 func pageArgs(r *http.Request) (int, string) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if n <= 0 {
@@ -365,25 +304,13 @@ func pageArgs(r *http.Request) (int, string) {
 func (a *App) routes() {
 	m := a.mux
 	m.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { reply(w, 200, map[string]string{"status": "ok"}) })
-	m.HandleFunc("GET /api/v1/auth/session", a.sessionInfo)
-	m.HandleFunc("GET /api/v1/auth/google/start", a.googleStart)
-	m.HandleFunc("GET /api/v1/auth/google/callback", a.googleCallback)
-	m.HandleFunc("POST /api/v1/auth/google/claim", a.desktopClaim)
-	m.HandleFunc("POST /api/v1/auth/logout", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
-		a.mu.Lock()
-		delete(a.sessions, p.owner)
-		a.mu.Unlock()
-		a.media.RevokeOwner(p.owner)
-		http.SetCookie(w, &http.Cookie{Name: "myanime_session", Path: "/", MaxAge: -1, HttpOnly: true, Secure: a.secure(r), SameSite: http.SameSiteLaxMode})
-		w.WriteHeader(204)
-	}))
 	m.HandleFunc("GET /api/v1/capabilities", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		reply(w, 200, map[string]any{"desktop": a.cfg.Mode == "desktop", "csrfToken": p.csrf, "providers": a.catalog.Providers()})
 	}))
-	m.HandleFunc("GET /api/v1/providers", a.public(func(w http.ResponseWriter, r *http.Request, p principal) {
+	m.HandleFunc("GET /api/v1/providers", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		reply(w, 200, map[string]any{"items": a.catalog.Providers()})
 	}))
-	m.HandleFunc("GET /api/v1/catalog", a.public(func(w http.ResponseWriter, r *http.Request, p principal) {
+	m.HandleFunc("GET /api/v1/catalog", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		n, c := pageArgs(r)
 		q := r.URL.Query()
 		year, _ := strconv.Atoi(q.Get("year"))
@@ -402,7 +329,7 @@ func (a *App) routes() {
 		}
 		reply(w, 200, result)
 	}))
-	m.HandleFunc("GET /api/v1/anime/{id}", a.public(func(w http.ResponseWriter, r *http.Request, p principal) {
+	m.HandleFunc("GET /api/v1/anime/{id}", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		v, e := a.catalog.Detail(ctx, r.PathValue("id"))
@@ -416,7 +343,7 @@ func (a *App) routes() {
 		}
 		reply(w, 200, v)
 	}))
-	m.HandleFunc("GET /api/v1/anime/{id}/episodes", a.public(func(w http.ResponseWriter, r *http.Request, p principal) {
+	m.HandleFunc("GET /api/v1/anime/{id}/episodes", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		id := r.PathValue("id")
@@ -615,7 +542,7 @@ func (a *App) routes() {
 	}))
 	for _, name := range []string{"genres", "schedule"} {
 		name := name
-		m.HandleFunc("GET /api/v1/"+name, a.public(func(w http.ResponseWriter, r *http.Request, p principal) {
+		m.HandleFunc("GET /api/v1/"+name, a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 			var v any
@@ -675,7 +602,6 @@ func (a *App) resolve(w http.ResponseWriter, r *http.Request, p principal) {
 	if a.secure(r) {
 		scheme = "https"
 	}
-	a.mu.Lock()
 	v, e := a.media.Create(ctx, s, p.owner, scheme+"://"+r.Host)
 	if e != nil {
 		handleErr(w, e)

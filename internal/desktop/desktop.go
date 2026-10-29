@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -49,21 +48,6 @@ func (b *Bootstrap) close() {
 	b.session = Session{}
 }
 
-// Auth opens the system browser for Google sign-in. Embedded webviews are not
-// allowed to run Google consent, so the shell hands the URL to the OS instead.
-type Auth struct{}
-
-func (Auth) Open(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u == nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" {
-		return errors.New("sign-in URL must be a plain HTTPS URL")
-	}
-	if u.Hostname() != "accounts.google.com" {
-		return errors.New("sign-in URL must point at Google")
-	}
-	return mygo.Shell.OpenExternal(u.String())
-}
-
 // Run must be called on the main goroutine, as required by native UI toolkits.
 func Run() (result error) {
 	mygo.App.SetName("MyAnime")
@@ -84,19 +68,8 @@ func Run() (result error) {
 	if _, err := mygo.App.Path(mygo.PathCache); err != nil {
 		return fmt.Errorf("desktop cache directory: %w", err)
 	}
-	google := app.GoogleConfig{
-		ClientID:            os.Getenv("MYANIME_GOOGLE_CLIENT_ID"),
-		ClientSecret:        os.Getenv("MYANIME_GOOGLE_CLIENT_SECRET"),
-		DesktopClientID:     os.Getenv("MYANIME_GOOGLE_DESKTOP_CLIENT_ID"),
-		DesktopClientSecret: os.Getenv("MYANIME_GOOGLE_DESKTOP_CLIENT_SECRET"),
-		AllowedEmails:       splitList(os.Getenv("MYANIME_GOOGLE_ALLOWED_EMAILS")),
-		AllowedDomains:      splitList(os.Getenv("MYANIME_GOOGLE_ALLOWED_DOMAINS")),
-	}
-	if google.ClientID == "" || google.ClientSecret == "" || (len(google.AllowedEmails) == 0 && len(google.AllowedDomains) == 0) {
-		return errors.New("Google sign-in requires MYANIME_GOOGLE_CLIENT_ID, MYANIME_GOOGLE_CLIENT_SECRET and MYANIME_GOOGLE_ALLOWED_EMAILS or MYANIME_GOOGLE_ALLOWED_DOMAINS")
-	}
 	application, err := app.New(app.Config{
-		DataDir: dataDir, FrontendFS: frontendFS, Mode: "desktop", Google: google,
+		DataDir: dataDir, FrontendFS: frontendFS, Mode: "desktop",
 		Development: origin != "", DevOrigin: origin,
 	})
 	if err != nil {
@@ -117,7 +90,6 @@ func Run() (result error) {
 		return errors.New("desktop application did not issue an API capability")
 	}
 	mygo.Bind(bootstrap)
-	mygo.Bind(Auth{})
 	server := &http.Server{
 		Handler: exactHost(listener.Addr().String(), application.Handler()), ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
@@ -184,14 +156,4 @@ func exactHost(host string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func splitList(value string) []string {
-	var out []string
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }

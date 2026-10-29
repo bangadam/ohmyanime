@@ -1,24 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { call, isMyGo } from "mygo-runtime";
 import {
   api,
-  claimDesktopSignIn,
   APIError,
-  desktopSignIn,
   errorMessage,
-  googleSignInURL,
   id,
   initialize,
-  isDesktop,
   json,
-  setCSRF,
-  setSessionToken,
   type Anime,
   type Episode,
   type HistoryItem,
   type Page,
   type Provider,
-  type SessionInfo,
   type Settings,
 } from "./api";
 import { copy } from "./copy";
@@ -32,7 +24,6 @@ import Details from "./pages/Details";
 import MyList from "./pages/MyList";
 import History from "./pages/History";
 import Preferences from "./pages/Preferences";
-import SignIn from "./pages/SignIn";
 import { Player } from "./Player";
 import { focusElement, isAbortError, localTimeZoneLabel } from "./utils";
 import { useThemeController } from "./theme";
@@ -49,33 +40,7 @@ const defaults: Settings = {
 
 const seasons = ["winter", "spring", "summer", "fall"] as const;
 
-/**
- * A web sign-in leaves the page, so the episode the viewer asked for is stored
- * for one reload. The desktop shell stays in place and resumes directly.
- */
-const RESUME_KEY = "ohmyanime.resumePlay";
-
-function rememberPlay(animeId: string, episodeId: string) {
-  try {
-    window.sessionStorage.setItem(RESUME_KEY, JSON.stringify({ animeId, episodeId }));
-  } catch {
-    /* private contexts can refuse storage; the viewer can press play again */
-  }
-}
-
-function takeRememberedPlay(): { animeId: string; episodeId: string } | null {
-  try {
-    const raw = window.sessionStorage.getItem(RESUME_KEY);
-    if (!raw) return null;
-    window.sessionStorage.removeItem(RESUME_KEY);
-    const value = JSON.parse(raw) as { animeId?: string; episodeId?: string };
-    return value.animeId && value.episodeId ? { animeId: value.animeId, episodeId: value.episodeId } : null;
-  } catch {
-    return null;
-  }
-}
-
-type AuthState = "loading" | "guest" | "ready" | "error";
+type BootState = "loading" | "ready" | "error";
 type NoticeState = { message: string; tone: "status" | "error" } | null;
 type ConfirmKind = "history" | "list" | "cache" | null;
 type Genre = { id: string; name: string };
@@ -94,18 +59,9 @@ function BootFrame({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
-  // Session and shell
-  const [auth, setAuth] = useState<AuthState>("loading");
+  // Startup and shell
+  const [bootState, setBootState] = useState<BootState>("loading");
   const [bootError, setBootError] = useState("");
-  const [loginBusy, setLoginBusy] = useState(false);
-  const [loginError, setLoginError] = useState("");
-  const [googleConfigured, setGoogleConfigured] = useState(true);
-  const signInPoll = useRef<{ cancelled: boolean; timer: number | null }>({ cancelled: false, timer: null });
-  const [signInOpen, setSignInOpen] = useState(false);
-  /** What the viewer tried to do when sign-in was required. */
-  const pendingAction = useRef<(() => void) | null>(null);
-  const authRef = useRef<AuthState>("loading");
-  authRef.current = auth;
   const [view, setView] = useState<NavKey>("home");
   const [notice, setNotice] = useState<NoticeState>(null);
   const [confirmKind, setConfirmKind] = useState<ConfirmKind>(null);
@@ -188,108 +144,45 @@ export default function App() {
   const mainFocusReady = useRef(false);
 
   async function boot() {
-    setAuth("loading");
+    setBootState("loading");
     setBootError("");
-    // A failed redirect reports itself as a dismissible notice; the visitor keeps
-    // browsing as a guest.
-    const redirectResult = authQueryMessage();
-    if (redirectResult) setNotice({ message: redirectResult, tone: "error" });
     try {
-      await initialize();
-      const session = await api<SessionInfo>("/auth/session");
-      setGoogleConfigured(session.google.configured);
-      setCSRF(session.csrfToken);
-      setAuth(session.authenticated ? "ready" : "guest");
-      if (session.authenticated) {
-        const resume = takeRememberedPlay();
-        if (resume) {
-          void api<Anime>(`/anime/${id(resume.animeId)}`)
-            .then((detail) => openAnime(detail, resume.episodeId))
-            .catch(() => {
-              /* the title may be gone; the viewer lands on the catalogue */
-            });
-        }
-      }
+      const capabilities = await initialize();
+      setProviders(capabilities.providers);
+      setBootState("ready");
     } catch (reason) {
-      setBootError(errorMessage(reason, copy.auth.connectBody));
-      setAuth("error");
-    }
-  }
-
-  /** Reads and then clears the `?auth=` result a redirect leaves behind. */
-  function authQueryMessage(): string {
-    const params = new URLSearchParams(window.location.search);
-    const result = params.get("auth");
-    if (!result || result === "ok") return "";
-    params.delete("auth");
-    const query = params.toString();
-    window.history.replaceState({}, "", window.location.pathname + (query ? "?" + query : "") + window.location.hash);
-    switch (result) {
-      case "denied":
-        return copy.auth.denied;
-      case "not_allowed":
-        return copy.auth.notAllowed;
-      case "expired":
-        return copy.auth.expired;
-      default:
-        return copy.auth.failed;
+      setBootError(errorMessage(reason, copy.startup.connectBody));
+      setBootState("error");
     }
   }
 
   useEffect(() => {
     void boot();
-    const unauthorized = () => {
-      // Guests browse public endpoints only; a 401 there means "sign in to use
-      // this", not "your session ended". Only a signed-in visitor is logged out.
-      if (authRef.current !== "ready") return;
-      detailController.current?.abort();
-      listController.current?.abort();
-      setAnime(null);
-      setEpisode(null);
-      setEpisodes([]);
-      setAutoplayEpisode(null);
-      setDetailState("idle");
-      setDetailError("");
-      setConfirmKind(null);
-      setNotice(null);
-      setAuth("guest");
-    };
-    window.addEventListener("myanime:unauthorized", unauthorized);
     return () => {
-      window.removeEventListener("myanime:unauthorized", unauthorized);
       detailController.current?.abort();
       listController.current?.abort();
     };
   }, []);
 
-  // Settings need a session; providers and genres are public.
+  // Load local preferences and catalogue filters once startup completes.
   useEffect(() => {
-    if (auth === "loading" || auth === "error") return;
+    if (bootState !== "ready") return;
     const controller = new AbortController();
     const signal = controller.signal;
-    if (auth === "ready") {
-      setSettingsLoading(true);
-      void api<Settings>("/settings", { signal })
-        .then((value) => {
-          if (signal.aborted) return;
-          setSettings(value);
-          setProvider(value.preferredProvider);
-          setSaveError("");
-        })
-        .catch((reason: unknown) => {
-          if (signal.aborted) return;
-          setNotice({ message: errorMessage(reason, copy.preferences.loadError), tone: "error" });
-        })
-        .finally(() => {
-          if (!signal.aborted) setSettingsLoading(false);
-        });
-    }
-    void api<Page<Provider>>("/providers", { signal })
+    setSettingsLoading(true);
+    void api<Settings>("/settings", { signal })
       .then((value) => {
-        if (!signal.aborted) setProviders(value.items ?? []);
+        if (signal.aborted) return;
+        setSettings(value);
+        setProvider(value.preferredProvider);
+        setSaveError("");
       })
-      .catch(() => {
-        /* Provider status is optional for browsing; failures never block the catalogue. */
+      .catch((reason: unknown) => {
+        if (signal.aborted) return;
+        setNotice({ message: errorMessage(reason, copy.preferences.loadError), tone: "error" });
+      })
+      .finally(() => {
+        if (!signal.aborted) setSettingsLoading(false);
       });
     void api<Page<Genre>>("/genres", { signal })
       .then((value) => {
@@ -299,11 +192,11 @@ export default function App() {
         /* Genre filters fall back to "All genres" when the list is unavailable. */
       });
     return () => controller.abort();
-  }, [auth]);
+  }, [bootState]);
 
   // One abortable loader per view. Cursor pagination appends in the load-more handlers.
   useEffect(() => {
-    if (auth !== "ready" && auth !== "guest") return;
+    if (bootState !== "ready") return;
     const controller = new AbortController();
     listController.current?.abort();
     listController.current = controller;
@@ -312,20 +205,20 @@ export default function App() {
     else if (view === "search") void loadSearch(signal);
     else if (view === "season") void loadSeason(signal);
     else if (view === "schedule") void loadSchedule(signal);
-    else if (view === "list" && auth === "ready") void loadList(signal);
-    else if (view === "history" && auth === "ready") void loadHistory(signal);
+    else if (view === "list") void loadList(signal);
+    else if (view === "history") void loadHistory(signal);
     return () => {
       controller.abort();
       if (listController.current && listController.current !== controller) listController.current.abort();
       listController.current = null;
     };
-  }, [auth, view, searchQuery, genre, season, year, reload]);
+  }, [bootState, view, searchQuery, genre, season, year, reload]);
 
   // Move focus into the shell when the title overlay opens or closes. The player
   // owns focus while it replaces the shell. The first ready render keeps native
   // document focus so the first Tab reaches the skip link.
   useEffect(() => {
-    if (auth !== "ready") {
+    if (bootState !== "ready") {
       mainFocusReady.current = false;
       return;
     }
@@ -334,16 +227,16 @@ export default function App() {
       return;
     }
     focusElement("#main");
-  }, [auth, anime?.id]);
+  }, [bootState, anime?.id]);
 
   // Keep the document title aligned with the visible destination.
   useEffect(() => {
-    if (auth === "loading") {
+    if (bootState === "loading") {
       document.title = copy.brandName;
       return;
     }
-    if (auth === "error") {
-      document.title = copy.auth.connectTitle + " · " + copy.brandName;
+    if (bootState === "error") {
+      document.title = copy.startup.connectTitle + " · " + copy.brandName;
       return;
     }
     const pageTitle =
@@ -361,7 +254,7 @@ export default function App() {
                   ? copy.history.title
                   : copy.preferences.title;
     document.title = (anime?.title ?? pageTitle) + " · " + copy.brandName;
-  }, [auth, view, anime?.title]);
+  }, [bootState, view, anime?.title]);
 
   async function loadHome(signal: AbortSignal) {
     setHomeLoading(true);
@@ -371,10 +264,7 @@ export default function App() {
     setHomeCursor(null);
     const [catalogueResult, historyResult] = await Promise.allSettled([
       api<Page<Anime>>("/catalog?limit=24", { signal }),
-      // Continue watching is personal; guests simply get no history section.
-      auth === "ready"
-        ? api<Page<HistoryItem>>("/history?limit=12", { signal })
-        : Promise.resolve({ items: [] as HistoryItem[], nextCursor: null }),
+      api<Page<HistoryItem>>("/history?limit=12", { signal }),
     ]);
     if (signal.aborted) return;
     if (catalogueResult.status === "fulfilled") {
@@ -616,7 +506,6 @@ export default function App() {
         if (!signal.aborted) setAnime(detail);
       });
       const bookmarkRequest = (async () => {
-        if (authRef.current !== "ready") return;
         let cursor: string | null = null;
         do {
           const page: Page<Anime> = await api<Page<Anime>>(
@@ -685,10 +574,6 @@ export default function App() {
   }
 
   async function toggleBookmark() {
-    if (auth !== "ready") {
-      requestSignIn(() => void toggleBookmark());
-      return;
-    }
     if (!anime || bookmarkBusy) return;
     const target = anime;
     const wasBookmarked = bookmarked;
@@ -790,122 +675,7 @@ export default function App() {
     }
   }
 
-  async function signOut() {
-    try {
-      await api("/auth/logout", { method: "POST" });
-    } catch (reason) {
-      setNotice({ message: errorMessage(reason, copy.preferences.signOutError), tone: "error" });
-      return;
-    }
-    detailController.current?.abort();
-    listController.current?.abort();
-    setAnime(null);
-    setEpisode(null);
-    setEpisodes([]);
-    setAutoplayEpisode(null);
-    setDetailState("idle");
-    setDetailError("");
-    setConfirmKind(null);
-    setNotice(null);
-    setSessionToken("");
-    setLoginError("");
-    setAuth("guest");
-    setView("home");
-  }
-
-  /** Runs an action now, or asks for Google sign-in first and runs it after. */
-  function requestSignIn(action?: () => void) {
-    if (auth === "ready") {
-      action?.();
-      return;
-    }
-    pendingAction.current = action ?? null;
-    setLoginError("");
-    setSignInOpen(true);
-  }
-
-  function finishSignIn() {
-    setAuth("ready");
-    setSignInOpen(false);
-    const action = pendingAction.current;
-    pendingAction.current = null;
-    action?.();
-  }
-
-  function cancelSignIn() {
-    signInPoll.current.cancelled = true;
-    if (signInPoll.current.timer !== null) window.clearTimeout(signInPoll.current.timer);
-    signInPoll.current.timer = null;
-    setLoginBusy(false);
-    setLoginError("");
-    pendingAction.current = null;
-    setSignInOpen(false);
-  }
-
-  /**
-   * Desktop: the shell opens Google in the system browser (embedded webviews
-   * are rejected by Google) and polls for the finished session. Web: a normal
-   * navigation to the flow endpoint, which redirects back with `?auth=`.
-   */
-  async function startGoogleSignIn() {
-    if (loginBusy || !googleConfigured) return;
-    setLoginError("");
-    if (!isMyGo()) {
-      window.location.assign(googleSignInURL("/"));
-      return;
-    }
-    setLoginBusy(true);
-    try {
-      const start = await desktopSignIn();
-      await call("Auth.Open", start.url);
-      signInPoll.current.cancelled = false;
-      pollDesktopSignIn(start.handoff, start.pollToken, Date.now());
-    } catch (reason) {
-      setLoginBusy(false);
-      setLoginError(errorMessage(reason, copy.auth.failed));
-    }
-  }
-
-  function pollDesktopSignIn(handoff: string, pollToken: string, startedAt: number) {
-    const tick = async () => {
-      if (signInPoll.current.cancelled) return;
-      try {
-        const result = await claimDesktopSignIn(handoff, pollToken);
-        if (signInPoll.current.cancelled) return;
-        if (result.pending) {
-          // The browser may take a while; stop after ten minutes.
-          if (Date.now() - startedAt > 10 * 60_000) {
-            setLoginBusy(false);
-            setLoginError(copy.auth.expired);
-            return;
-          }
-          signInPoll.current.timer = window.setTimeout(() => void tick(), 2000);
-          return;
-        }
-        if (result.apiToken && result.csrfToken) {
-          setSessionToken(result.apiToken);
-          setCSRF(result.csrfToken);
-          setLoginBusy(false);
-          setLoginError("");
-          finishSignIn();
-          return;
-        }
-        setLoginBusy(false);
-        setLoginError(copy.auth.failed);
-      } catch (reason) {
-        if (signInPoll.current.cancelled) return;
-        setLoginBusy(false);
-        setLoginError(errorMessage(reason, copy.auth.failed));
-      }
-    };
-    void tick();
-  }
-
   function navigate(target: NavKey) {
-    if (auth !== "ready" && (target === "list" || target === "history" || target === "settings")) {
-      requestSignIn(() => navigate(target));
-      return;
-    }
     detailController.current?.abort();
     setAnime(null);
     setEpisode(null);
@@ -955,15 +725,6 @@ export default function App() {
   }
 
   function openPlayer(next: Episode) {
-    // Watching needs an identity: browsing is public, playback is not.
-    if (auth !== "ready") {
-      if (anime) rememberPlay(anime.id, next.id);
-      requestSignIn(() => {
-        setAutoplayEpisode(next.id);
-        setEpisode(next);
-      });
-      return;
-    }
     // A direct Play action is explicit play intent, not autoplay-next preference.
     setAutoplayEpisode(next.id);
     setEpisode(next);
@@ -984,36 +745,24 @@ export default function App() {
     setReload((value) => value + 1);
   }
 
-  if (auth === "loading") {
+  if (bootState === "loading") {
     return (
       <BootFrame>
-        <Spinner label={copy.auth.opening} />
+        <Spinner label={copy.startup.loading} />
       </BootFrame>
     );
   }
 
-  if (auth === "error") {
+  if (bootState === "error") {
     return (
       <BootFrame>
         <ErrorState
-          title={copy.auth.connectTitle}
+          title={copy.startup.connectTitle}
           description={bootError}
           retry={() => void boot()}
-          retryLabel={copy.auth.retry}
+          retryLabel={copy.startup.retry}
         />
       </BootFrame>
-    );
-  }
-
-  if (signInOpen) {
-    return (
-      <SignIn
-        busy={loginBusy}
-        error={loginError}
-        configured={googleConfigured}
-        onGoogle={() => void startGoogleSignIn()}
-        onCancel={cancelSignIn}
-      />
     );
   }
 
@@ -1171,7 +920,6 @@ export default function App() {
         onClearHistory={() => setConfirmKind("history")}
         onClearList={() => setConfirmKind("list")}
         onClearCache={() => setConfirmKind("cache")}
-        onSignOut={() => void signOut()}
       />
     );
   }
@@ -1202,9 +950,6 @@ export default function App() {
       view={anime ? null : view}
       onNavigate={navigate}
       onSearch={openSearch}
-      signedIn={auth === "ready"}
-      onSignIn={() => requestSignIn()}
-      onLogout={() => void signOut()}
     >
       {notice ? (
         <div className="app-notices">

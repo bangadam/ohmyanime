@@ -1,5 +1,5 @@
 /*
-  App-level orchestration surfaces only: boot/session frames, the notice slot,
+  App-level orchestration surfaces only: boot frames, the notice slot,
   and the crash fallback rendered by main.tsx. Page and component styling lives
   in their own CSS files.
 */
