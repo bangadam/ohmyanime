@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APIError, api, errorMessage, id, initialize, json, mediaURL, sessionBearer } from "./api";
+import { APIError, api, errorMessage, fetchGenres, fetchTags, id, initialize, json, mediaURL, sessionBearer } from "./api";
 import { copy } from "./copy";
 
 /* Guest browse-to-play flow: the web app talks to the API without an account,
@@ -102,6 +102,33 @@ describe("initialize", () => {
     await api("/settings", { method: "PUT", body: "{}" });
     const [, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
     expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("token-1");
+  });
+});
+
+describe("facet fetchers", () => {
+  it("unwraps the genre vocabulary", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { data: { items: [{ id: "Action", name: "Action" }] } }),
+    );
+    await expect(fetchGenres()).resolves.toEqual([{ id: "Action", name: "Action" }]);
+  });
+
+  it("unwraps the tag vocabulary with its category", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        data: { items: [{ id: "Isekai", name: "Isekai", category: "Setting" }] },
+      }),
+    );
+    await expect(fetchTags()).resolves.toEqual([
+      { id: "Isekai", name: "Isekai", category: "Setting" },
+    ]);
+    const [path] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(path).toBe("/api/v1/tags");
+  });
+
+  it("treats a missing items array as an empty vocabulary", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { data: {} }));
+    await expect(fetchTags()).resolves.toEqual([]);
   });
 });
 

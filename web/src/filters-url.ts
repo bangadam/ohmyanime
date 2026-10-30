@@ -26,6 +26,7 @@ const SORT_VALUES: readonly CatalogSort[] = [
   "title_asc",
   "title_desc",
 ];
+const SEASON_VALUES: readonly string[] = ["winter", "spring", "summer", "fall"];
 
 export function defaultCatalogFilters(): CatalogFilters {
   return {
@@ -117,7 +118,9 @@ export function parseCatalogHash(hash: string): CatalogFilters | null {
     sort: pickEnum(params.get("sort"), SORT_VALUES, "popular"),
     genres: readFacets(params, "genre"),
     tags: readFacets(params, "tag"),
-    season: (params.get("season") ?? "").trim(),
+    // An unknown season is a hand-edited URL, not a filter the API accepts;
+    // drop it here so a reload restores a working view instead of a 400.
+    season: pickEnum((params.get("season") ?? "").trim() || null, SEASON_VALUES, ""),
     year: parseYear(params.get("year")),
   };
 }

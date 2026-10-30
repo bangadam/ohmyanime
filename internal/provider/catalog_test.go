@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"myanime/internal/domain"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCatalogEnumMaps(t *testing.T) {
@@ -90,6 +92,36 @@ func TestCatalogQueryInvalidEnums(t *testing.T) {
 				t.Fatalf("document = %q, vars = %v; want empty on failure", document, vars)
 			}
 		})
+	}
+}
+
+// Cursor boundaries are inclusive: page 1 and page 10000 are valid, anything
+// outside that range fails before a request is made.
+func TestCatalogQueryCursorBoundaries(t *testing.T) {
+	for _, cursor := range []string{"1", "10000"} {
+		if _, vars, err := catalogQuery(domain.CatalogQuery{Cursor: cursor}); err != nil {
+			t.Fatalf("cursor %q rejected: %v", cursor, err)
+		} else if vars["page"] != func() int { n, _ := strconv.Atoi(cursor); return n }() {
+			t.Fatalf("cursor %q mapped to page %v", cursor, vars["page"])
+		}
+	}
+}
+
+// Genres and tags each travel as one list variable, which AniList ANDs; they
+// are never expanded into repeated OR clauses.
+func TestCatalogQueryGenreAND(t *testing.T) {
+	document, vars, err := catalogQuery(domain.CatalogQuery{Genres: []string{"Action", "Drama"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vars["genreIn"]; !reflect.DeepEqual(got, []string{"Action", "Drama"}) {
+		t.Fatalf("genreIn = %#v, want both entries", got)
+	}
+	if strings.Count(document, "genre_in:") != 1 {
+		t.Fatalf("genres must stay in one AND clause:\n%s", document)
+	}
+	if strings.Contains(document, "genre_in:Action") {
+		t.Fatalf("genre values must not be interpolated:\n%s", document)
 	}
 }
 
@@ -202,44 +234,44 @@ func TestCatalogQueryDocument(t *testing.T) {
 		{
 			name:  "defaults",
 			query: domain.CatalogQuery{},
-			decls: []string{"$page:Int", "$perPage:Int"},
-			args:  []string{"type:ANIME", "isAdult:false", "sort:POPULARITY_DESC"},
-			vars:  map[string]any{"page": 1, "perPage": 24},
+			decls: []string{"$page:Int", "$perPage:Int", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "sort:$sort"},
+			vars:  map[string]any{"page": 1, "perPage": 24, "sort": []string{"POPULARITY_DESC"}},
 		},
 		{
 			name:  "no filters keeps the minimal document",
 			query: domain.CatalogQuery{Cursor: "2", Limit: 0},
-			decls: []string{"$page:Int", "$perPage:Int"},
-			args:  []string{"type:ANIME", "isAdult:false", "sort:POPULARITY_DESC"},
-			vars:  map[string]any{"page": 2, "perPage": 24},
+			decls: []string{"$page:Int", "$perPage:Int", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "sort:$sort"},
+			vars:  map[string]any{"page": 2, "perPage": 24, "sort": []string{"POPULARITY_DESC"}},
 		},
 		{
-			name:  "sort token is interpolated",
+			name:  "sort token travels as a variable",
 			query: domain.CatalogQuery{Sort: domain.CatalogSortTitleDesc, Limit: 50},
-			decls: []string{"$page:Int", "$perPage:Int"},
-			args:  []string{"type:ANIME", "isAdult:false", "sort:TITLE_ROMAJI_DESC"},
-			vars:  map[string]any{"page": 1, "perPage": 50},
+			decls: []string{"$page:Int", "$perPage:Int", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "sort:$sort"},
+			vars:  map[string]any{"page": 1, "perPage": 50, "sort": []string{"TITLE_ROMAJI_DESC"}},
 		},
 		{
 			name:  "status and format travel as variables",
 			query: domain.CatalogQuery{Status: "not_yet_released", Type: "tv_short"},
-			decls: []string{"$page:Int", "$perPage:Int", "$status:MediaStatus", "$format:MediaFormat"},
-			args:  []string{"type:ANIME", "isAdult:false", "status:$status", "format:$format", "sort:POPULARITY_DESC"},
-			vars:  map[string]any{"page": 1, "perPage": 24, "status": "NOT_YET_RELEASED", "format": "TV_SHORT"},
+			decls: []string{"$page:Int", "$perPage:Int", "$status:MediaStatus", "$format:MediaFormat", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "status:$status", "format:$format", "sort:$sort"},
+			vars:  map[string]any{"page": 1, "perPage": 24, "status": "NOT_YET_RELEASED", "format": "TV_SHORT", "sort": []string{"POPULARITY_DESC"}},
 		},
 		{
 			name:  "genres and tags are normalized AND lists",
 			query: domain.CatalogQuery{Genres: []string{" Action ", "action", "", "Fantasy"}, Tags: []string{"Isekai", "ISEKAI"}},
-			decls: []string{"$page:Int", "$perPage:Int", "$genres:[String]", "$tags:[String]"},
-			args:  []string{"type:ANIME", "isAdult:false", "genre_in:$genres", "tag_in:$tags", "sort:POPULARITY_DESC"},
-			vars:  map[string]any{"page": 1, "perPage": 24, "genres": []string{"Action", "Fantasy"}, "tags": []string{"Isekai"}},
+			decls: []string{"$page:Int", "$perPage:Int", "$genreIn:[String]", "$tags:[String]", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "genre_in:$genreIn", "tag_in:$tags", "sort:$sort"},
+			vars:  map[string]any{"page": 1, "perPage": 24, "genreIn": []string{"Action", "Fantasy"}, "tags": []string{"Isekai"}, "sort": []string{"POPULARITY_DESC"}},
 		},
 		{
 			name:  "search season and year",
 			query: domain.CatalogQuery{Query: "frieren", Season: "fall", Year: 2023, Sort: domain.CatalogSortNewest},
-			decls: []string{"$page:Int", "$perPage:Int", "$search:String", "$season:MediaSeason", "$year:Int"},
-			args:  []string{"type:ANIME", "isAdult:false", "search:$search", "season:$season", "seasonYear:$year", "sort:START_DATE_DESC"},
-			vars:  map[string]any{"page": 1, "perPage": 24, "search": "frieren", "season": "FALL", "year": 2023},
+			decls: []string{"$page:Int", "$perPage:Int", "$search:String", "$season:MediaSeason", "$year:Int", "$sort:[MediaSort]"},
+			args:  []string{"type:ANIME", "isAdult:false", "search:$search", "season:$season", "seasonYear:$year", "sort:$sort"},
+			vars:  map[string]any{"page": 1, "perPage": 24, "search": "frieren", "season": "FALL", "year": 2023, "sort": []string{"START_DATE_DESC"}},
 		},
 	}
 	for _, tt := range tests {
@@ -264,7 +296,7 @@ func TestCatalogQueryPinsExactDefaultDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("catalogQuery() error = %v", err)
 	}
-	want := "query($page:Int,$perPage:Int){Page(page:$page,perPage:$perPage){pageInfo{hasNextPage} media(type:ANIME,isAdult:false,sort:POPULARITY_DESC){" + mediaFields + "}}}"
+	want := "query($page:Int,$perPage:Int,$sort:[MediaSort]){Page(page:$page,perPage:$perPage){pageInfo{hasNextPage} media(type:ANIME,isAdult:false,sort:$sort){" + mediaFields + "}}}"
 	if document != want {
 		t.Fatalf("document =\n%s\nwant\n%s", document, want)
 	}
@@ -291,5 +323,33 @@ func TestTagVocabulary(t *testing.T) {
 	}
 	if got := tagVocabulary(nil); len(got) != 0 {
 		t.Fatalf("tagVocabulary(nil) = %#v, want empty", got)
+	}
+}
+
+func TestCachedTagEntriesFallback(t *testing.T) {
+	s := New()
+	s.putCache("anime:a", domain.Anime{Tags: []string{"Isekai", "Time Travel"}}, nil, time.Hour)
+	// A second title repeats one tag with different casing; the first spelling
+	// after sorting must win, and the duplicate must disappear.
+	s.putCache("anime:b", domain.Anime{Tags: []string{"isekai", "Band"}}, nil, time.Hour)
+	// Wrong key namespace, wrong value type and expired entries are ignored.
+	s.putCache("manga:x", domain.Manga{Tags: []string{"Ignored"}}, nil, time.Hour)
+	s.putCache("anime:wrong-type", "not an anime", nil, time.Hour)
+	s.putCache("anime:expired", domain.Anime{Tags: []string{"Expired"}}, nil, -time.Minute)
+
+	items := tagVocabulary(s.cachedTagEntries())
+	want := []map[string]string{
+		{"id": "Band", "name": "Band", "category": ""},
+		{"id": "Isekai", "name": "Isekai", "category": ""},
+		{"id": "Time Travel", "name": "Time Travel", "category": ""},
+	}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("cached tags = %#v, want %#v", items, want)
+	}
+}
+
+func TestCachedTagEntriesEmptyCache(t *testing.T) {
+	if got := New().cachedTagEntries(); len(got) != 0 {
+		t.Fatalf("cachedTagEntries() = %#v, want empty", got)
 	}
 }

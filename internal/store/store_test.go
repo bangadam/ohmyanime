@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,34 @@ func fixture(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	return s, path
+}
+
+// Genres and tags are part of the whole domain.Anime struct stored in
+// anime.metadata_json, so they must survive a write/read round trip without a
+// SQL column migration.
+func TestAnimeMetadataRoundTripTaxonomy(t *testing.T) {
+	s, _ := fixture(t)
+	ctx := context.Background()
+	want := domain.Anime{
+		ID:           "taxonomy",
+		Title:        "Taxonomy",
+		Genres:       []string{"Action", "Fantasy"},
+		Tags:         []string{"Isekai", "Time Travel"},
+		Availability: []string{},
+	}
+	if err := s.UpsertAnime(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Anime(ctx, "taxonomy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Genres, want.Genres) {
+		t.Fatalf("genres = %v, want %v", got.Genres, want.Genres)
+	}
+	if !slices.Equal(got.Tags, want.Tags) {
+		t.Fatalf("tags = %v, want %v", got.Tags, want.Tags)
+	}
 }
 func TestContinueHiddenHideUnhidePersistence(t *testing.T) {
 	s, path := fixture(t)

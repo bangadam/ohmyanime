@@ -373,6 +373,9 @@ func TestHTTPCatalogueInvalidFiltersContract(t *testing.T) {
 		"/catalog?type=bogus",
 		"/catalog?season=bogus",
 		"/catalog?cursor=0",
+		"/catalog?cursor=10001",
+		"/catalog?year=bogus",
+		"/catalog?year=0",
 	} {
 		env := c.request("GET", path, "", 400)
 		if env.Error.Code != "INVALID_INPUT" {

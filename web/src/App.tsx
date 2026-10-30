@@ -3,6 +3,8 @@ import {
   api,
   APIError,
   errorMessage,
+  fetchGenres,
+  fetchTags,
   id,
   initialize,
   mangaChapters as fetchMangaChapters,
@@ -108,7 +110,7 @@ export default function App() {
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [detailError, setDetailError] = useState("");
   const [provider, setProvider] = useState("auto");
-  const [mode, setMode] = useState("sub");
+  const [mode] = useState("sub");
   const [bookmarked, setBookmarked] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState(false);
   const [watched, setWatched] = useState<Record<string, boolean>>({});
@@ -328,17 +330,17 @@ export default function App() {
     const signal = controller.signal;
     setGenresError("");
     setTagsError("");
-    void api<Page<Genre>>("/genres", { signal })
-      .then((value) => {
-        if (!signal.aborted) setGenres(value.items ?? []);
+    void fetchGenres({ signal })
+      .then((items) => {
+        if (!signal.aborted) setGenres(items);
       })
       .catch((reason: unknown) => {
         if (signal.aborted || isAbortError(reason)) return;
         setGenresError(copy.browse.genresUnavailable);
       });
-    void api<Page<Tag>>("/tags", { signal })
-      .then((value) => {
-        if (!signal.aborted) setTags(value.items ?? []);
+    void fetchTags({ signal })
+      .then((items) => {
+        if (!signal.aborted) setTags(items);
       })
       .catch((reason: unknown) => {
         if (signal.aborted || isAbortError(reason)) return;
@@ -432,7 +434,7 @@ export default function App() {
     setHomeItems([]);
     setHomeHistory([]);
     setHomeCursor(null);
-    const [catalogueResult, historyResult, hiddenResult] = await Promise.allSettled([
+    const [catalogueResult, , hiddenResult] = await Promise.allSettled([
       api<Page<Anime>>("/catalog?limit=24", { signal }),
       api<Page<HistoryItem>>("/history?limit=12", { signal }),
       api<{ animeIds: string[] }>("/continue-hidden", { signal }),
@@ -793,7 +795,12 @@ export default function App() {
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      setCatalogItems((current) => [...current, ...(result.items ?? [])]);
+      // Cursor pages are keyed by the same filters, but a source may still
+      // repeat a title across pages; never render the same id twice.
+      setCatalogItems((current) => {
+        const seen = new Set(current.map((item) => item.id));
+        return [...current, ...(result.items ?? []).filter((item) => !seen.has(item.id))];
+      });
       setCatalogCursor(result.nextCursor ?? null);
     } catch (reason) {
       if (!controller.signal.aborted && !isAbortError(reason)) {

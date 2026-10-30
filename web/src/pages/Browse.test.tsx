@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Anime } from "../api";
 import { copy, format } from "../copy";
@@ -73,18 +73,62 @@ describe("Browse filter panel", () => {
     expect(onApply).toHaveBeenCalledOnce();
   });
 
-  it("appends and removes a genre chip without mutating the filter arrays", () => {
+  it("adds and removes a genre through the combobox without mutating arrays", () => {
     const onFilters = vi.fn();
     const { rerender } = render(<Browse {...browseProps({ onFilters })} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Action" }));
+    const input = screen.getByRole("combobox", { name: copy.browse.genreSearchLabel });
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
     expect(onFilters).toHaveBeenLastCalledWith(expect.objectContaining({ genres: ["Action"] }));
 
     rerender(
       <Browse {...browseProps({ onFilters, filters: filters({ genres: ["Action", "Drama"] }) })} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Action" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: format(copy.browse.removeGenre, { genre: "Action" }) }),
+    );
     expect(onFilters).toHaveBeenLastCalledWith(expect.objectContaining({ genres: ["Drama"] }));
+  });
+
+  it("drives the genre listbox with arrow keys and Escape", () => {
+    const onFilters = vi.fn();
+    render(<Browse {...browseProps({ onFilters })} />);
+    const input = screen.getByRole("combobox", { name: copy.browse.genreSearchLabel });
+
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: "ArrowDown" }); // Action
+    fireEvent.keyDown(input, { key: "ArrowDown" }); // Drama
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    const listbox = screen.getByRole("listbox");
+    expect(within(listbox).getAllByRole("option")).toHaveLength(2);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onFilters).toHaveBeenLastCalledWith(expect.objectContaining({ genres: ["Drama"] }));
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("moves focus to the applied summary after applying", () => {
+    render(<Browse {...browseProps()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: copy.browse.apply }));
+
+    const summary = screen.getByRole("region", { name: copy.browse.activeFilters });
+    expect(document.activeElement).toBe(summary);
+  });
+
+  it("labels each filter group with a fieldset legend", () => {
+    const { container } = render(<Browse {...browseProps()} />);
+    const legends = Array.from(container.querySelectorAll("fieldset > legend")).map(
+      (node) => node.textContent,
+    );
+
+    expect(legends).toContain(copy.browse.statusLabel);
+    expect(legends).toContain(copy.browse.typeLabel);
+    expect(legends).toContain(copy.browse.sortLabel);
   });
 
   it("removes an active filter chip and applies the reduced set immediately", () => {

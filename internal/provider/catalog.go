@@ -144,9 +144,9 @@ var catalogFormats = map[string]string{
 
 var catalogSeasons = map[string]string{"WINTER": "WINTER", "SPRING": "SPRING", "SUMMER": "SUMMER", "FALL": "FALL"}
 
-// catalogSorts keeps the request token next to its upstream enum: the sort is
-// interpolated as a literal because GraphQL cannot bind an enum through a
-// variable, so the value must already be an allowlisted token.
+// catalogSorts keeps the request token next to its upstream enum. The value
+// travels as a [MediaSort] variable, so it must already be an allowlisted
+// token; validation happens before any request is made.
 var catalogSorts = map[string]string{
 	domain.CatalogSortPopular:   "POPULARITY_DESC",
 	domain.CatalogSortTrending:  "TRENDING_DESC",
@@ -212,6 +212,7 @@ func catalogQuery(q domain.CatalogQuery) (string, map[string]any, error) {
 	args := []string{"type:ANIME", "isAdult:false"}
 	vars := map[string]any{"page": page, "perPage": limit}
 	if q.Query != "" {
+
 		decls = append(decls, "$search:String")
 		args = append(args, "search:$search")
 		vars["search"] = q.Query
@@ -227,9 +228,9 @@ func catalogQuery(q domain.CatalogQuery) (string, map[string]any, error) {
 		vars["format"] = format
 	}
 	if genres := normalizeTerms(q.Genres, maxCatalogTerms); len(genres) > 0 {
-		decls = append(decls, "$genres:[String]")
-		args = append(args, "genre_in:$genres")
-		vars["genres"] = genres
+		decls = append(decls, "$genreIn:[String]")
+		args = append(args, "genre_in:$genreIn")
+		vars["genreIn"] = genres
 	}
 	if tags := normalizeTerms(q.Tags, maxCatalogTerms); len(tags) > 0 {
 		decls = append(decls, "$tags:[String]")
@@ -246,7 +247,12 @@ func catalogQuery(q domain.CatalogQuery) (string, map[string]any, error) {
 		args = append(args, "seasonYear:$year")
 		vars["year"] = q.Year
 	}
-	args = append(args, "sort:"+sortToken)
+	// Sort is always present, so it stays a declared variable rather than an
+	// interpolated literal: the value is allowlisted above and travels through
+	// the GraphQL variable map like every other filter.
+	decls = append(decls, "$sort:[MediaSort]")
+	args = append(args, "sort:$sort")
+	vars["sort"] = []string{sortToken}
 	document := `query(` + strings.Join(decls, ",") + `){Page(page:$page,perPage:$perPage){pageInfo{hasNextPage} media(` + strings.Join(args, ",") + `){` + mediaFields + `}}}`
 	return document, vars, nil
 }
@@ -359,7 +365,47 @@ func tagVocabulary(in []mediaTagEntry) []map[string]string {
 	return items
 }
 
-// Tags lists the upstream tag vocabulary for catalogue facets.
+// cachedTagEntries rebuilds a tag vocabulary from titles already fetched when
+// the upstream collection is unavailable or has no entries. Per-title tags
+// carry no category, so the fallback entries leave it empty rather than
+// inventing a grouping. The result is sorted by tagVocabulary like the live
+// collection, keeping facet order deterministic across both paths.
+func (s *Service) cachedTagEntries() []mediaTagEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	entries := make([]mediaTagEntry, 0)
+	for key, cached := range s.cache {
+		if !strings.HasPrefix(key, "anime:") || cached.err != nil || !now.Before(cached.until) {
+			continue
+		}
+		a, ok := cached.value.(domain.Anime)
+		if !ok {
+			continue
+		}
+		for _, name := range a.Tags {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				entries = append(entries, mediaTagEntry{Name: name})
+			}
+		}
+	}
+	// Map iteration is unordered and duplicates may carry different spellings;
+	// sort before tagVocabulary so the chosen spelling is deterministic.
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name)
+		if a != b {
+			return a < b
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	return entries
+}
+
+// Tags lists the upstream tag vocabulary for catalogue facets. When the
+// collection query succeeds but returns nothing (the field is missing for this
+// upstream revision), the vocabulary is derived from cached titles so the
+// browse filters stay usable instead of silently disappearing.
 func (s *Service) Tags(ctx context.Context) (any, error) {
 	var result struct {
 		MediaTagCollection []mediaTagEntry
@@ -367,7 +413,11 @@ func (s *Service) Tags(ctx context.Context) (any, error) {
 	if e := s.graphql(ctx, `{MediaTagCollection{name category isAdult isGeneralSpoiler isMediaSpoiler}}`, nil, &result); e != nil {
 		return nil, e
 	}
-	return map[string]any{"items": tagVocabulary(result.MediaTagCollection)}, nil
+	entries := result.MediaTagCollection
+	if len(entries) == 0 {
+		entries = s.cachedTagEntries()
+	}
+	return map[string]any{"items": tagVocabulary(entries)}, nil
 }
 func (s *Service) Schedule(ctx context.Context) (any, error) {
 	now := time.Now().Unix()

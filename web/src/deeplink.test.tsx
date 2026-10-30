@@ -115,9 +115,12 @@ describe("App deep-link navigation", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: copy.nav.home })).toBeTruthy());
     const callsBefore = apiMock.mock.calls.length;
     emitLink({ kind: "novel", titleId: "x" });
+    // Unknown kinds must not trigger title resolution; unrelated background
+    // loads (facets, settings) may still settle, so assert on title routes.
     const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 20);
+    setTimeout(resolve, 100);
     await promise;
-    expect(apiMock.mock.calls.length).toBe(callsBefore);
+    const extraCalls = apiMock.mock.calls.slice(callsBefore).map(([path]) => path);
+    expect(extraCalls.filter((path) => /^\/anime\/|^\/manga\//.test(String(path)))).toEqual([]);
   });
 });

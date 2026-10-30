@@ -320,15 +320,25 @@
           {
             "name": "season",
             "in": "query",
+            "description": "Season filter. Unknown values are rejected with 400 INVALID_INPUT.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "winter",
+                "spring",
+                "summer",
+                "fall"
+              ]
             }
           },
           {
             "name": "year",
             "in": "query",
+            "description": "Season year filter. Must be a number between 1 and 9999; anything else is rejected with 400 INVALID_INPUT.",
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9999
             }
           },
           {

@@ -106,7 +106,7 @@ describe("parseCatalogHash", () => {
   });
 
   it("falls back per field on unknown enum values", () => {
-    const parsed = parseCatalogHash("#browse?status=airing&type=series&sort=random&query=keep");
+    const parsed = parseCatalogHash("#browse?status=airing&type=series&sort=random&season=monsoon&query=keep");
     expect(parsed).toEqual(filters({ query: "keep" }));
   });
 

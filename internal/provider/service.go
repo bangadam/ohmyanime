@@ -67,6 +67,10 @@ func New() *Service {
 		}
 		return validateURL(r.URL)
 	}}
+	// The catalogue cache is process-local and starts empty: a restart (or a
+	// binary upgrade) never reuses titles fetched by an older taxonomy mapping.
+	// That keeps pre-tags entries, which have no genre/tag fields, from
+	// lingering in a long-lived cache after the mapping changed.
 	s := &Service{client: c, cache: map[string]entry{}, enabled: map[string]bool{}, cooldown: map[string]time.Time{}, health: map[string]Health{}, reg: newRegistry()}
 	// Registration is the only wiring an in-process adapter needs.
 	for _, adapter := range []AnimeProvider{newHianime(s), newOtakudesu(s), newAnichan(s)} {

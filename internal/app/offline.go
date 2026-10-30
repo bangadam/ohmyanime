@@ -26,7 +26,10 @@ import (
 // data, and any later successful fetch replaces the stale payload.
 
 const (
-	catalogueCacheSchema = 2
+	// Schema 3 adds genres and tags to cached titles and the tag facet. Bumping
+	// the version makes entries written by an older build unreadable, so a
+	// tag-less cached page can never be served stale after the upgrade.
+	catalogueCacheSchema = 3
 	catalogueCacheTTL    = 24 * time.Hour
 )
 

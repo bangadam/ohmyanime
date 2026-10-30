@@ -1,5 +1,6 @@
 import { call, isMyGo } from "mygo-runtime";
 import { copy } from "./copy";
+import type { Genre, Tag } from "./types";
 
 export interface Anime {
   id: string;
@@ -307,6 +308,21 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     );
   }
   return body.data as T;
+}
+
+/** Genre vocabulary for the browse facets. */
+export async function fetchGenres(init: RequestInit = {}): Promise<Genre[]> {
+  const page = await api<Page<Genre>>("/genres", init);
+  return page.items ?? [];
+}
+
+/**
+ * Tag vocabulary for the browse facets. Entries carry the upstream category so
+ * the browse sidebar can group the long list without extra requests.
+ */
+export async function fetchTags(init: RequestInit = {}): Promise<Tag[]> {
+  const page = await api<Page<Tag>>("/tags", init);
+  return page.items ?? [];
 }
 export const id = encodeURIComponent;
 export const json = (value: unknown) => JSON.stringify(value);

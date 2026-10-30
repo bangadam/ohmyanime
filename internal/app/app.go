@@ -235,8 +235,19 @@ func (a *App) handleErr(w http.ResponseWriter, err error) {
 		case "invalid_mapping", "invalid_provider":
 			status, code, msg = 400, "INVALID_INPUT", "Invalid source mapping"
 		// Catalogue filters are validated before any upstream call, so a
-		// rejected value is a client bug and must not read as an outage.
-		case "invalid_filter", "invalid_sort", "invalid_status", "invalid_type", "invalid_season", "invalid_cursor":
+		// rejected value is a client bug and must not read as an outage. The
+		// message names the offending parameter so the client can fix it.
+		case "invalid_sort":
+			status, code, msg = 400, "INVALID_INPUT", "sort is not a supported value"
+		case "invalid_status":
+			status, code, msg = 400, "INVALID_INPUT", "status is not a supported value"
+		case "invalid_type":
+			status, code, msg = 400, "INVALID_INPUT", "type is not a supported value"
+		case "invalid_season":
+			status, code, msg = 400, "INVALID_INPUT", "season is not a supported value"
+		case "invalid_cursor":
+			status, code, msg = 400, "INVALID_INPUT", "cursor must be a page between 1 and 10000"
+		case "invalid_filter":
 			status, code, msg = 400, "INVALID_INPUT", "Invalid catalogue filter"
 		case "provider_disabled":
 			status, code, msg = 409, "PROVIDER_DISABLED", "This source is disabled"
@@ -329,6 +340,20 @@ func pageArgs(r *http.Request) (int, string) {
 	return n, r.URL.Query().Get("cursor")
 }
 
+// catalogYear parses the optional catalogue year filter. An absent value means
+// "any year"; a malformed or out-of-range value is a client error and must
+// never reach the provider.
+func catalogYear(raw string) (int, bool) {
+	if raw == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 9999 {
+		return 0, false
+	}
+	return n, true
+}
+
 // splitList flattens repeated and comma-separated query values into one list.
 // Entries are trimmed and blanks dropped; the provider owns dedupe and caps.
 func splitList(values []string) []string {
@@ -363,7 +388,11 @@ func (a *App) routes() {
 	m.HandleFunc("GET /api/v1/catalog", a.protect(func(w http.ResponseWriter, r *http.Request, p principal) {
 		n, c := pageArgs(r)
 		q := r.URL.Query()
-		year, _ := strconv.Atoi(q.Get("year"))
+		year, ok := catalogYear(q.Get("year"))
+		if !ok {
+			failure(w, 400, "INVALID_INPUT", "year must be a number between 1 and 9999")
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		query := domain.CatalogQuery{

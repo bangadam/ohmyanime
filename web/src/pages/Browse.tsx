@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import {
   Button,
   EmptyState,
@@ -118,8 +118,13 @@ function summarize(applied: CatalogFilters): SummaryChip[] {
   return chips;
 }
 
-/** Searchable, collapsible genre facets; the vocabulary is never invented. */
-function GenreFacets({
+/**
+ * Genre picker as a combobox: type to narrow the vocabulary, arrow keys move
+ * the active option, Enter toggles it, Escape closes. Selected genres stay
+ * visible as removable chips, even when the vocabulary failed to load, so a
+ * restored URL never strands a filter the user cannot clear.
+ */
+function GenreCombobox({
   genres,
   error,
   selected,
@@ -133,18 +138,61 @@ function GenreFacets({
   onRetry: () => void;
 }) {
   const [search, setSearch] = useState("");
-  const [expanded, setExpanded] = useState(false);
-  if (genres.length === 0 && !error) return null;
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  if (genres.length === 0 && !error && selected.length === 0) return null;
 
   const needle = search.trim().toLowerCase();
   const matching = needle === "" ? genres : genres.filter((item) => item.name.toLowerCase().includes(needle));
-  const visible = expanded ? matching : matching.slice(0, GENRE_PAGE);
+  const visible = matching.slice(0, GENRE_PAGE);
+
+  function toggle(name: string) {
+    onToggle(
+      selected.includes(name)
+        ? selected.filter((item) => item !== name)
+        : [...selected, name],
+    );
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setActive((current) => Math.min(current + 1, visible.length - 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      setActive((current) => Math.max(current - 1, 0));
+    } else if (event.key === "Enter") {
+      if (open && active >= 0 && active < visible.length) {
+        // Picking an option must not also submit the surrounding filter form.
+        event.preventDefault();
+        toggle(visible[active].id);
+      }
+    } else if (event.key === "Escape") {
+      setOpen(false);
+      setActive(-1);
+    }
+  }
 
   return (
-    <div className="browse-group">
-      <h2 className="field__label" id="browse-genres-label">
-        {copy.browse.genresLabel}
-      </h2>
+    <fieldset className="browse-group browse-combobox">
+      <legend className="field__label">{copy.browse.genresLabel}</legend>
+      {selected.length > 0 ? (
+        <div className="chips" role="group" aria-label={copy.browse.genreSelected}>
+          {selected.map((name) => (
+            <button
+              key={name}
+              type="button"
+              className="chips__chip"
+              aria-label={format(copy.browse.removeGenre, { genre: name })}
+              onClick={() => toggle(name)}
+            >
+              <span aria-hidden="true">×</span> {name}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {error ? (
         <div className="browse-facets">
           <p className="field__error" role="alert">
@@ -156,48 +204,65 @@ function GenreFacets({
         </div>
       ) : (
         <>
-          <div className="browse-facet-search">
-            <TextField
-              id="browse-genre-search"
-              type="search"
-              label={copy.browse.genreSearchLabel}
+          <div
+            className="browse-combobox__control"
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+            }}
+          >
+            <input
+              id="browse-genre"
+              className="field__input"
+              type="text"
+              role="combobox"
+              aria-label={copy.browse.genreSearchLabel}
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls="browse-genre-listbox"
+              aria-activedescendant={open && active >= 0 ? `browse-genre-option-${active}` : undefined}
               placeholder={copy.browse.genreSearchPlaceholder}
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setOpen(true);
+                setActive(-1);
+              }}
+              onFocus={() => setOpen(true)}
+              onKeyDown={handleKeyDown}
             />
+            {open ? (
+              <div className="browse-combobox__list" id="browse-genre-listbox" role="listbox">
+                {visible.map((genre, index) => (
+                  <div
+                    key={genre.id}
+                    id={`browse-genre-option-${index}`}
+                    role="option"
+                    tabIndex={-1}
+                    aria-selected={selected.includes(genre.id)}
+                    className={
+                      index === active ? "browse-combobox__option is-active" : "browse-combobox__option"
+                    }
+                    // Keep focus in the input so a click never closes the list
+                    // before the click handler runs.
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setActive(index)}
+                    onClick={() => toggle(genre.id)}
+                  >
+                    {genre.name}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
-          <div className="chips browse-facets" role="group" aria-labelledby="browse-genres-label">
-            {visible.map((genre) => (
-              <button
-                key={genre.id}
-                type="button"
-                className="chips__chip"
-                aria-pressed={selected.includes(genre.id)}
-                onClick={() =>
-                  onToggle(
-                    selected.includes(genre.id)
-                      ? selected.filter((item) => item !== genre.id)
-                      : [...selected, genre.id],
-                  )
-                }
-              >
-                {genre.name}
-              </button>
-            ))}
-          </div>
-          {matching.length > GENRE_PAGE ? (
-            <button
-              type="button"
-              className="browse-facet-toggle"
-              aria-expanded={expanded}
-              onClick={() => setExpanded((current) => !current)}
-            >
-              {expanded ? copy.browse.showFewerGenres : copy.browse.showAllGenres}
-            </button>
+          {open && needle !== "" && visible.length === 0 ? (
+            <p className="browse-combobox__empty" role="status">
+              {format(copy.browse.genreNoMatch, { query: search.trim() })}
+            </p>
           ) : null}
+          <p className="field__hint">{copy.browse.genreHint}</p>
         </>
       )}
-    </div>
+    </fieldset>
   );
 }
 
@@ -326,15 +391,25 @@ export default function Browse(props: BrowsePageProps) {
     onRetry,
   } = props;
 
+  const summaryRef = useRef<HTMLElement | null>(null);
   const count = items.length;
   const loadingFirst = loading && count === 0;
   const activeCount = activeFilterCount(applied);
   const chips = summarize(applied);
 
+  /**
+   * Applying moves focus to the applied-filter summary: the results reload
+   * asynchronously, so keyboard users need a stable place to continue from.
+   */
+  function applyAndFocus() {
+    onApply();
+    summaryRef.current?.focus();
+  }
+
   /** Applying immediately is one user action: reduce the draft, then apply it. */
   function removeFilter(next: CatalogFilters) {
     onFilters(next);
-    onApply();
+    applyAndFocus();
   }
 
   return (
@@ -346,7 +421,7 @@ export default function Browse(props: BrowsePageProps) {
         aria-label={copy.a11y.filterGroup}
         onSubmit={(event) => {
           event.preventDefault();
-          onApply();
+          applyAndFocus();
         }}
       >
         <div className="browse-form">
@@ -360,33 +435,33 @@ export default function Browse(props: BrowsePageProps) {
           />
 
           <div className="browse-form__grid">
-            <div className="browse-group">
-              <h2 className="field__label">{copy.browse.statusLabel}</h2>
+            <fieldset className="browse-group">
+              <legend className="field__label">{copy.browse.statusLabel}</legend>
               <FilterChips<CatalogStatus>
                 label={copy.browse.statusLabel}
                 value={filters.status}
                 options={STATUS_OPTIONS}
                 onChange={(value) => onFilters({ ...filters, status: value })}
               />
-            </div>
-            <div className="browse-group">
-              <h2 className="field__label">{copy.browse.typeLabel}</h2>
+            </fieldset>
+            <fieldset className="browse-group">
+              <legend className="field__label">{copy.browse.typeLabel}</legend>
               <FilterChips<CatalogType>
                 label={copy.browse.typeLabel}
                 value={filters.type}
                 options={TYPE_OPTIONS}
                 onChange={(value) => onFilters({ ...filters, type: value })}
               />
-            </div>
-            <div className="browse-group">
-              <h2 className="field__label">{copy.browse.sortLabel}</h2>
+            </fieldset>
+            <fieldset className="browse-group">
+              <legend className="field__label">{copy.browse.sortLabel}</legend>
               <FilterChips<CatalogSort>
                 label={copy.browse.sortLabel}
                 value={filters.sort}
                 options={SORT_OPTIONS}
                 onChange={(value) => onFilters({ ...filters, sort: value })}
               />
-            </div>
+            </fieldset>
           </div>
 
           <div className="browse-form__grid browse-form__grid--pair">
@@ -406,7 +481,7 @@ export default function Browse(props: BrowsePageProps) {
             />
           </div>
 
-          <GenreFacets
+          <GenreCombobox
             genres={genres}
             error={genresError}
             selected={filters.genres}
@@ -433,7 +508,12 @@ export default function Browse(props: BrowsePageProps) {
         </div>
       </form>
 
-      <section className="browse-summary" aria-label={copy.browse.activeFilters}>
+      <section
+        className="browse-summary"
+        aria-label={copy.browse.activeFilters}
+        ref={summaryRef}
+        tabIndex={-1}
+      >
         {activeCount === 0 ? (
           <p className="browse-summary__empty">{copy.browse.noFilters}</p>
         ) : (
